@@ -3,6 +3,7 @@ dist/
 public/esp-emu/
 public/parts/
 public/boards/
+public/model-converter/
 src-tauri/target/
 src-tauri/gen/
 .verification/

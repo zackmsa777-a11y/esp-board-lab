@@ -8,6 +8,7 @@ import type { Profile } from './boards/types';
 import type { DisplayFrame, PartSnapshot } from './emu/parts/host';
 import { detectBoard } from './detect';
 import { Device } from './Device';
+import { preference, savePreference } from './three/model';
 
 export function App() {
   const [profiles, setProfiles] = useState<Profile[]>([]);
@@ -22,6 +23,13 @@ export function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState('');
   const [dragging, setDragging] = useState(false);
+  const [deviceMode, setDeviceMode] = useState<'2d' | '3d'>(() => preference('device-mode', '2d') === '3d' ? '3d' : '2d');
+  const [focus, setFocus] = useState(false);
+  useEffect(() => {
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') setFocus(false); };
+    window.addEventListener('keydown', escape);
+    return () => window.removeEventListener('keydown', escape);
+  }, []);
   const worker = useRef<Worker | null>(null);
   const terminal = useRef<Terminal | null>(null);
   const terminalHost = useRef<HTMLDivElement>(null);
@@ -109,6 +117,7 @@ export function App() {
   const chip = profile?.chip ?? 'esp32s3';
   const state = error ? (snapshot?.faulted ? 'Faulted' : 'Error') : busy ? 'Loading' : !ready ? 'Starting' : snapshot?.running ? 'Running' : loaded ? 'Paused' : 'Ready';
   const gpio = snapshot?.gpio_state;
+  const mode3d = deviceMode === '3d' && !!profile?.model3d;
   return (
     <main className={`workbench${dragging ? ' drag-active' : ''}`}
       onDragOver={event => { event.preventDefault(); if (ready && !busy) setDragging(true); }}
@@ -137,10 +146,13 @@ export function App() {
       {detected && <div className="detection-banner" role="status">{detected}<span>Change Board to override.</span></div>}
       {error && <div className="error" role="alert"><strong>{snapshot?.faulted ? 'CPU fault' : 'Emulator error'}</strong><pre>{error}</pre><span>{snapshot?.faulted ? 'Reset to boot again. Peripheral emulation is incomplete.' : 'Check the firmware and selected chip, then load again.'}</span></div>}
 
-      <div className="workspace">
+      <div className={`workspace${mode3d ? ' workspace-3d' : ''}${mode3d && focus ? ' device-focused' : ''}`}>
         <section className="device-panel" aria-labelledby="device-heading">
-          <div className="section-heading"><h2 id="device-heading">Device</h2><span>{chip.toUpperCase()}</span></div>
-          <Device profile={profile} frame={frame} parts={parts} enabled={loaded && !busy} input={partInput} />
+          <div className="section-heading"><h2 id="device-heading">Device</h2><div className="device-view-actions">
+            {profile?.model3d && <><div className="view-toggle" role="group" aria-label="Device view">{(['2d', '3d'] as const).map(mode => <button key={mode} aria-pressed={deviceMode === mode} onClick={() => { setDeviceMode(mode); savePreference('device-mode', mode); }}>{mode.toUpperCase()}</button>)}</div>
+            {mode3d && <button aria-pressed={focus} onClick={() => setFocus(value => !value)}>{focus ? 'Exit focus (Esc)' : 'Focus'}</button>}</>}
+            <span>{chip.toUpperCase()}</span></div></div>
+          <Device profile={profile} frame={frame} parts={parts} enabled={loaded && !busy} input={partInput} mode={mode3d ? '3d' : '2d'} />
           <div className="gpio-heading"><h2>GPIO state</h2><span>Output registers</span></div>
           <div className="pin-grid" aria-label="GPIO output state">
             {Array.from({ length: chip === 'esp32c3' ? 22 : 49 }, (_, pin) => {

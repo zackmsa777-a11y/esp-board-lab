@@ -95,6 +95,35 @@ figcaption span { color: var(--muted); }
 .error strong { font-weight: 650; }
 .error pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 5px 0; font-size: 11px; }
 .drop-overlay { position: fixed; inset: 12px; border: 2px dashed var(--accent); border-radius: 8px; background: #162739ed; display: grid; place-items: center; font-size: 25px; color: #c9e3ff; pointer-events: none; }
+.workspace-3d { grid-template-columns: minmax(540px, 1.5fr) minmax(320px, 1fr); }
+.device-view-actions, .view-toggle, .model-toolbar { display: flex; align-items: center; gap: 8px; }
+.device-view-actions > span { color: var(--muted); font-size: 11px; }
+.device-view-actions button, .model-toolbar button { min-height: 30px; padding: 4px 10px; font-size: 12px; }
+.view-toggle { gap: 0; }
+.view-toggle button { border-radius: 0; }
+.view-toggle button:first-child { border-radius: 5px 0 0 5px; }
+.view-toggle button:last-child { border-radius: 0 5px 5px 0; border-left: 0; }
+.view-toggle button[aria-pressed=true] { background: #a3c9f0; color: #142435; }
+.model-toolbar { flex-wrap: wrap; margin: 0 0 12px; }
+.model-toolbar label { font-size: 12px; color: var(--muted); }
+.model-toolbar select { width: auto; max-width: 260px; margin-right: auto; font-size: 12px; min-height: 30px; }
+.device-scene { height: clamp(320px, 46vh, 580px); border-radius: 12px; overflow: hidden; background: #101720; cursor: grab; }
+.device-scene canvas { touch-action: none; -webkit-user-select: none; user-select: none; display: block; }
+.model-hint { color: #b9c9d9; font-size: 12px; line-height: 1.7; margin: 12px 0 0; }
+.model-view .gpio-note { margin-top: 6px; }
+.model-download { padding: 0 0 12px; }
+.model-download p { font-size: 12px; line-height: 1.6; color: var(--muted); margin: 0 0 10px; max-width: 75ch; }
+.model-download button { font-size: 12px; margin-right: 8px; }
+.model-download a { color: #a3c9f0; text-underline-offset: 3px; }
+.model-progress { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; font-size: 12px; padding: 0 0 12px; }
+.model-progress progress { accent-color: var(--accent); width: 150px; }
+.model-error { font-size: 12px; color: #ffc6c1; line-height: 1.6; }
+.device-focused { grid-template-columns: 1fr; }
+.device-focused .serial-panel { display: none; }
+.device-focused .device-scene { height: max(360px, calc(100dvh - 340px)); }
+.device-focused .device-panel { border: 0; }
+.device-focused .pin-grid { grid-template-columns: repeat(auto-fill, minmax(44px, 1fr)); }
+@media (max-width: 1100px) { .workspace.workspace-3d { grid-template-columns: minmax(0, 1fr); overflow-y: auto; } .workspace-3d .serial-panel { min-height: 350px; } .workspace-3d .device-panel { overflow: visible; } }
 @media (max-width: 1050px) {
   .toolbar { flex-wrap: wrap; gap: 10px; padding: 12px 16px; }
   h1 { width: 100%; }

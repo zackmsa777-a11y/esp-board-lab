@@ -1,10 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import type { Profile } from './boards/types';
 import type { DisplayFrame, PartSnapshot } from './emu/parts/host';
+const ModelView = lazy(() => import('./three/ModelView'));
 
-export function Device({ profile, frame, parts, enabled, input }: {
+export function Device({ profile, frame, parts, enabled, input, mode = '2d' }: {
   profile?: Profile; frame: DisplayFrame | null; parts: PartSnapshot[]; enabled: boolean;
   input: (part: string, kind: string) => void;
+  mode?: '2d' | '3d';
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const device = useRef<HTMLDivElement>(null);
@@ -25,7 +27,7 @@ export function Device({ profile, frame, parts, enabled, input }: {
     context.translate(target.width / 2, target.height / 2); context.rotate(rotation * Math.PI / 180);
     context.drawImage(source, -frame.width / 2, -frame.height / 2);
     context.resetTransform();
-  }, [frame, rotation]);
+  }, [frame, rotation, mode]);
   useEffect(() => {
     queue.current = [];
     if (!wheel || !enabled) return;
@@ -40,9 +42,21 @@ export function Device({ profile, frame, parts, enabled, input }: {
       const count = Math.max(1, Math.round(Math.abs(event.deltaY) / unit));
       for (let i = 0; i < count; i++) queue.current.push(event.deltaY > 0 ? 'cw' : 'ccw');
     };
-    element?.addEventListener('wheel', onWheel, { passive: false });
+    if (mode === '2d') element?.addEventListener('wheel', onWheel, { passive: false });
     return () => { clearInterval(timer); element?.removeEventListener('wheel', onWheel); };
-  }, [wheel?.part, enabled, input]);
+  }, [wheel?.part, enabled, input, mode]);
+  const turn = useCallback((steps: number) => {
+    if (!enabled || !wheel) return;
+    for (let i = 0; i < Math.abs(steps); i++) queue.current.push(steps > 0 ? 'cw' : 'ccw');
+  }, [enabled, wheel?.part]);
+  const press = useCallback((control: 'knob' | 'key') => {
+    const part = control === 'knob' ? wheel?.part : key?.part;
+    if (enabled && part) input(part, 'press');
+  }, [enabled, wheel?.part, key?.part, input]);
+  const release = useCallback((control: 'knob' | 'key') => {
+    const part = control === 'knob' ? wheel?.part : key?.part;
+    if (part) input(part, 'release');
+  }, [wheel?.part, key?.part, input]);
   useEffect(() => {
     if (!enabled) return;
     const held = new Map<string, string>();
@@ -80,17 +94,21 @@ export function Device({ profile, frame, parts, enabled, input }: {
   useEffect(() => { setPercent(Number(gauge?.percent ?? 75)); }, [gauge?.percent]);
   useEffect(() => { setUsb(truth(usbValue)); }, [usbValue]);
   useEffect(() => { setCharging(truth(chargingValue)); }, [chargingValue]);
+  const display = parts.find(part => part.name === profile?.display?.part)?.values;
+  const displayOn = !display || (display.on !== 'false' && display.on !== '0' && display.backlight !== 'false' && display.backlight !== '0' && display.sleeping !== 'true' && display.sleeping !== '1');
   return <>
-    <div className="device-bezel" ref={device}>
+    {mode === '3d' && profile?.model3d ? <Suspense fallback={<p className="gpio-note">Loading 3D viewer…</p>}>
+      <ModelView model={profile.model3d} frame={frame} rotation={rotation} displayOn={displayOn} enabled={enabled} turn={turn} press={press} release={release} />
+    </Suspense> : <div className="device-bezel" ref={device}>
       <button className="screen-button" disabled={!enabled || !wheel} aria-label="Press encoder; scroll to turn the wheel" {...(wheel ? hold(wheel.part) : {})}>
         <canvas ref={canvas} width="320" height="170" aria-label="Live firmware display" />
       </button>
+    </div>}
       <div className="device-controls">
         {wheel && <><button disabled={!enabled} onClick={() => queue.current.push('ccw')} aria-label="Turn wheel counterclockwise">Left</button><button disabled={!enabled} {...hold(wheel.part)}>Wheel</button><button disabled={!enabled} onClick={() => queue.current.push('cw')} aria-label="Turn wheel clockwise">Right</button></>}
         {key && <button disabled={!enabled} {...hold(key.part)}>Key</button>}
       </div>
-    </div>
-    <p className="gpio-note">{profile?.display ? 'Live display · scroll or ← → to turn · Enter to press · K for key' : 'This profile has no display or controls.'}</p>
+    {mode === '2d' && <p className="gpio-note">{profile?.display ? 'Live display · scroll or ← → to turn · Enter to press · K for key' : 'This profile has no display or controls.'}</p>}
     {battery && <section className="battery-panel">
       <div className="gpio-heading"><h2>Battery</h2><output>{gauge?.voltage_mv ? `${(Number(gauge.voltage_mv) / 1000).toFixed(3)} V` : '— V'}</output></div>
       <label htmlFor="battery-percent">Charge <output>{percent}%</output></label>

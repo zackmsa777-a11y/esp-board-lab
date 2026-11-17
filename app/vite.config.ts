@@ -8,6 +8,14 @@ function emulatorAssets(): Plugin {
   return {
     name: 'esp-emulator-assets',
     buildStart() {
+      // Keep the LGPL converter unmodified, separate and replaceable. These
+      // assets are fetched only after an explicit model download request.
+      const converter = fileURLToPath(new URL('./public/model-converter/', import.meta.url));
+      mkdirSync(converter, { recursive: true });
+      for (const file of ['occt-import-js.js', 'occt-import-js.wasm', 'license.occt-import-js.txt', 'license.occt.txt']) {
+        copyFileSync(fileURLToPath(new URL(`./node_modules/occt-import-js/dist/${file}`, import.meta.url)), `${converter}/${file}`);
+      }
+      copyFileSync(fileURLToPath(new URL('./src/three/convert.worker.js', import.meta.url)), `${converter}/convert.worker.js`);
       const destination = fileURLToPath(new URL('./public/esp-emu/', import.meta.url));
       mkdirSync(destination, { recursive: true });
       for (const file of ['esp_emu.js', 'esp_emu_bg.wasm']) {

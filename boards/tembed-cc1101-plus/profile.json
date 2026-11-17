@@ -28,5 +28,55 @@
   "battery": {
     "charger": "charger",
     "gauge": "gauge"
+  },
+  "model3d": {
+    "official": {
+      "url": "https://raw.githubusercontent.com/Xinyuan-LilyGO/T-Embed-CC1101/cf0f864fff39cb6152e4d4f5664300afd504d354/3D_files/T-Embed%20CC1101.stp",
+      "sha256": "37b9297c617ab621dadcf69be8875f606dde0858d4dbecdc416d871cd9878c27",
+      "source_page": "https://github.com/Xinyuan-LilyGO/T-Embed-CC1101",
+      "license_note": "No license; downloaded by the user from LilyGO at runtime, never redistributed"
+    },
+    "units": "mm",
+    "front": "-z",
+    "screen": {
+      "center": [
+        -11.57475,
+        0,
+        -2.215
+      ],
+      "size": [
+        43.9585,
+        23.9336
+      ],
+      "rotate": 0
+    },
+    "knob": {
+      "center": [
+        28,
+        0,
+        -4.7
+      ],
+      "radius": 13.2,
+      "height": 6,
+      "axis": [
+        0,
+        0,
+        -1
+      ]
+    },
+    "key": {
+      "center": [
+        30,
+        -19.8,
+        9
+      ],
+      "size": [
+        7,
+        2.4,
+        4
+      ]
+    },
+    "builtin": "pill",
+    "calibration_note": "Measured from cover-B front-plane boundary loops at z=-2.2 mm: screen x=-33.554..10.4045, y=-11.9668..11.9668; knob chamfer centered (28,0), radius 14.1263 at z=-2.2, narrowing to 13.6263 at z=-1.709. Knob radius 13.2 leaves clearance. Screen sits 0.015 mm in front of the aperture to avoid z-fighting. Key placement is an approximation on the -y side near the knob; no confirmed user-key opening in STEP. Built-in is independent procedural geometry, not derived mesh data."
   }
 }
