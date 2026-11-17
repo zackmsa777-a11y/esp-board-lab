@@ -1,0 +1,15 @@
+[package]
+name = "ebl-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Inspect ESP32 firmware images for esp-board-lab"
+
+[[bin]]
+name = "ebl"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+ebl-firmware = { path = "../firmware" }
+serde_json.workspace = true

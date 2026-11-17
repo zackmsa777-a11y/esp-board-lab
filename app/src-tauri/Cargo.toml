@@ -1,0 +1,18 @@
+[package]
+name = "esp-board-lab-app"
+version = "0.1.0"
+description = "ESP Board Lab desktop emulator"
+authors = ["ESP Board Lab contributors"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

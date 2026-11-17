@@ -1,0 +1,94 @@
+:root {
+  font-family: "Segoe UI", sans-serif;
+  font-size: 14px;
+  color: #dce5ef;
+  background: #10151c;
+  font-synthesis: none;
+  color-scheme: dark;
+  --surface: #19212c;
+  --line: #344050;
+  --muted: #a4b2c4;
+  --accent: #82b6ee;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+button, select, input { font: inherit; }
+button, select, .file-button { border: 1px solid #45556b; border-radius: 5px; background: #222e3c; color: #e7edf5; min-height: 36px; }
+button, .file-button { padding: 7px 15px; cursor: pointer; white-space: nowrap; }
+button:hover, .file-button:hover { background: #304156; }
+button:disabled, select:disabled, .disabled { opacity: .45; cursor: default; }
+button.primary { color: #10253c; background: #8bbcf0; border-color: #8bbcf0; min-width: 70px; font-weight: 650; }
+button.primary:hover { background: #b3d5fa; }
+:focus-visible { outline: 2px solid #b3d5fa; outline-offset: 3px; }
+::selection { background: #335779; color: #fff; }
+* { scrollbar-color: #506176 #10151c; scrollbar-width: thin; }
+.workbench { height: 100dvh; min-height: 560px; display: flex; flex-direction: column; }
+.toolbar { display: flex; align-items: center; gap: 10px; padding: 16px 22px; background: var(--surface); border-bottom: 1px solid var(--line); }
+h1 { font-size: 19px; letter-spacing: -.02em; margin: 0 16px 0 0; font-weight: 650; white-space: nowrap; }
+.board-control { display: flex; align-items: center; gap: 9px; margin-right: auto; min-width: 0; }
+.board-control label { color: var(--muted); font-size: 12px; }
+select { padding: 7px 30px 7px 10px; max-width: 360px; width: 100%; text-overflow: ellipsis; }
+.file-button { position: relative; display: flex; align-items: center; }
+.file-button input { position: absolute; inset: 0; opacity: 0; width: 100%; cursor: pointer; }
+.file-button:focus-within { outline: 2px solid #b3d5fa; outline-offset: 3px; }
+.firmware-strip { display: flex; justify-content: space-between; gap: 20px; padding: 10px 22px; color: var(--muted); font-size: 12px; border-bottom: 1px solid var(--line); }
+.filename { color: #dce5ef; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace { display: grid; grid-template-columns: 390px minmax(0, 1fr); flex: 1; min-height: 0; }
+.device-panel { background: #161e28; padding: 0 22px 20px; overflow-y: auto; border-right: 1px solid var(--line); }
+.section-heading { min-height: 56px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.section-heading > span, .serial-actions > span { color: var(--muted); font-size: 11px; }
+.display { margin: 0; }
+.display canvas { display: block; width: 320px; max-width: 100%; aspect-ratio: 320 / 170; background: #080c12; border: 1px solid #45556b; border-radius: 4px; }
+figcaption { display: flex; justify-content: space-between; gap: 8px; margin-top: 10px; color: #b4c1d1; font-size: 12px; max-width: 320px; }
+figcaption span { color: var(--muted); }
+.gpio-heading { display: flex; justify-content: space-between; align-items: center; margin: 30px 0 14px; }
+.gpio-heading > span { color: var(--muted); font-size: 11px; }
+.pin-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
+.pin { border: 1px solid #3b495b; border-radius: 4px; padding: 7px 2px 6px; text-align: center; font-variant-numeric: tabular-nums; background: #202a37; }
+.pin span { display: block; font-family: "Cascadia Code", Consolas, monospace; font-size: 13px; }
+.pin small { display: block; color: #b0bdcf; font-size: 9px; margin-top: 3px; }
+.pin.high { background: #244d52; border-color: #66bdc7; }
+.pin.high small { color: #b6eef3; }
+.pin.low { background: #273b55; border-color: #668fbd; }
+.pin.low small { color: #c5defa; }
+.pin.absent { opacity: .4; }
+.pin.absent small { font-size: 7px; }
+.gpio-note, .peripheral-note { color: var(--muted); font-size: 11px; line-height: 1.55; margin: 14px 0 0; }
+.peripheral-note { padding-top: 14px; border-top: 1px solid var(--line); }
+.serial-panel { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 0 20px; }
+.serial-actions { display: flex; align-items: center; gap: 14px; }
+.serial-actions button { padding: 4px 10px; min-height: 28px; font-size: 12px; }
+.terminal-host { flex: 1; min-height: 0; min-width: 0; padding-top: 3px; }
+.terminal-host .xterm { height: 100%; }
+.terminal-hint { color: var(--muted); font-size: 11px; padding: 12px 0; }
+.statusbar { display: flex; gap: 25px; align-items: center; min-height: 36px; padding: 8px 22px; background: var(--surface); border-top: 1px solid var(--line); font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.statusbar b { font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; font-weight: 400; color: #dce5ef; margin-left: 4px; }
+.state { display: inline-flex; align-items: center; gap: 7px; min-width: 65px; }
+.state i { width: 7px; height: 7px; border-radius: 50%; background: #99a9be; }
+.state.running i { background: #85d6c4; }
+.state.error i, .state.faulted i { background: #f5a19e; }
+.cycles { margin-left: auto; }
+.error { padding: 12px 22px; color: #ffc6c1; background: #3a252a; border-bottom: 1px solid #855456; font-size: 12px; max-height: 160px; overflow: auto; }
+.error strong { font-weight: 650; }
+.error pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 5px 0; font-size: 11px; }
+.drop-overlay { position: fixed; inset: 12px; border: 2px dashed var(--accent); border-radius: 8px; background: #162739ed; display: grid; place-items: center; font-size: 25px; color: #c9e3ff; pointer-events: none; }
+@media (max-width: 1050px) {
+  .toolbar { flex-wrap: wrap; gap: 10px; padding: 12px 16px; }
+  h1 { width: 100%; }
+  .workspace { grid-template-columns: 350px minmax(0, 1fr); }
+  .device-panel { padding-inline: 16px; }
+  .statusbar { gap: 14px; }
+}
+@media (max-width: 720px) {
+  .workbench { height: auto; min-height: 100dvh; }
+  .board-control { width: 100%; }
+  select { max-width: none; }
+  .workspace { grid-template-columns: 1fr; }
+  .device-panel { border-right: 0; border-bottom: 1px solid var(--line); }
+  .display canvas, figcaption { margin-inline: auto; }
+  .serial-panel { height: 430px; }
+  .statusbar { flex-wrap: wrap; }
+  .cycles { margin-left: 0; }
+  .firmware-strip > span:last-child { display: none; }
+}

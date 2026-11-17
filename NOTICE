@@ -1,0 +1,12 @@
+esp-board-lab
+Copyright 2026 esp-board-lab contributors
+
+This product includes the esp-emulator WebAssembly distribution by Espressif
+Systems and the esp-emulator contributors, licensed under Apache License 2.0.
+Source and releases: https://github.com/espressif/esp-emulator
+Vendored build: vendor/esp-emu-wasm (version and origin recorded in VERSION).
+The upstream WASM core is distributed as a binary; its source is not included.
+See LICENSE-APACHE for the Apache License, Version 2.0.
+
+The licenses of third-party components are independent of the MIT OR Apache-2.0
+license offered for original esp-board-lab contributions. See ATTRIBUTION.md.

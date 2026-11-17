@@ -1,0 +1,50 @@
+name: Release
+
+'on':
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install frontend dependencies
+        working-directory: app
+        run: npm ci
+      - name: Build desktop installers and create draft release
+        id: tauri
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          tagName: ${{ github.ref_name }}
+          releaseName: esp-board-lab ${{ github.ref_name }}
+          releaseBody: Windows desktop installers and ebl CLI. Firmware and board models must be obtained separately.
+          releaseDraft: true
+          prerelease: false
+          args: --bundles nsis,msi
+          uploadUpdaterJson: false
+      - name: Build Windows CLI
+        run: cargo build --release -p ebl-cli
+      - name: Attach Windows CLI to draft release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.tauri.outputs.releaseId }}
+        run: |
+          if (-not $env:RELEASE_ID) { throw 'Tauri action did not return a release ID' }
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID" | ConvertFrom-Json
+          $uploadUrl = ($release.upload_url -replace '\{.*\}$', '') + '?name=ebl-windows-x86_64.exe'
+          gh api --method POST $uploadUrl --header 'Content-Type: application/octet-stream' --input target/release/ebl.exe
+          if ($LASTEXITCODE -ne 0) { throw 'CLI release upload failed' }
