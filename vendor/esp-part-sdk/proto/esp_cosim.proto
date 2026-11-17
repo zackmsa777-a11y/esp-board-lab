@@ -1,0 +1,1145 @@
+/*
+ * SPDX-FileCopyrightText: 2026 Espressif Systems (Shanghai) CO LTD
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// esp-emu hardware-in-the-loop co-simulation bus.
+//
+// THIS FILE IS THE CONTRACT between the `esp-emu` emulator and a device model
+// running outside it. It is the ONLY thing they share. The emulator knows
+// nothing about devices or boards; a model knows nothing about emulator
+// internals. Everything either side is allowed to assume about the other is
+// written down here, so the comments are part of the contract.
+//
+// Two channels. Every transport must provide both.
+//   PUB      Emulator -> all models. Each message is [topic][EmulatorMessage].
+//            The emulator never waits. A model that stops reading misses
+//            messages; the CPU does not pause for it.
+//   ROUTER   Two-way, with one model at a time. Used for registration,
+//            scheduled inputs (e.g. drive a pin), answers to bus requests,
+//            serial bytes and the waveform on a PWM pad.
+//
+// A transport carries both channels and nothing else. The emulator has four:
+// the browser's, where a page pumps the byte queues itself; the part host,
+// which runs .wasm parts in the emulator's own process (`--cosim-board`); a
+// socket of length-prefixed frames, one consumer per connection
+// (`--cosim-tcp`); and an in-process loopback for tests. Several may serve
+// one chip at once. A new transport changes nothing in this file.
+//
+// Topics are hierarchical and filtered by byte prefix on frame 0, so
+// subscribing to "HW/GPIO/" receives every pin and "HW/GPIO/4/" only pin 4:
+//   SIM/CLOCK             ClockSync, once per simulated quantum
+//   SIM/RESET             ChipReset, once per chip reset
+//   SIM/EN                EnLevel, when the chip's EN pin moves
+//   HW/GPIO/<pin>/LEVEL   one message per pin per change
+//
+// Audio is not a topic: I2sFormat and I2sOut go on ROUTER to the one consumer
+// that claims the data pad, as a bus request does.
+
+syntax = "proto3";
+
+package esp_cosim.v1;
+
+// Protocol version, checked at handshake so a mismatch is a refused
+// registration rather than a silent misparse.
+//
+// Deliberately a declaration rather than a comment: every generated binding
+// takes its constant from here, so the two sides cannot drift apart.
+//   Rust:   esp_emu::cosim::proto::ProtoVersion::Current (PROTO_VERSION)
+//   JS:     pb.esp_cosim.v1.ProtoVersion.PROTO_VERSION_CURRENT
+//
+// Bump on ANY incompatible change: a renumbered field, a narrowed meaning, a
+// new required behaviour. Adding a new optional field or a new oneof arm is
+// backward compatible and does not need a bump.
+enum ProtoVersion {
+  PROTO_VERSION_UNSPECIFIED = 0;
+  PROTO_VERSION_CURRENT = 1;
+}
+
+// How a part compiled to WebAssembly is called: the functions it exports and
+// what its shared buffer holds. Written down in PART_ABI.md; the number lives
+// here so the part crates and every host that loads a part read one value
+// instead of restating it.
+//
+// Separate from ProtoVersion because the two move for different reasons: this
+// changes when a required export is added, removed or narrowed, that when a
+// message does.
+//
+// A host that does not implement the version a module reports refuses it
+// rather than calling a shape it guessed.
+enum PartAbiVersion {
+  PART_ABI_VERSION_UNSPECIFIED = 0;
+  PART_ABI_VERSION_CURRENT = 1;
+}
+
+// Every message on either channel, in both directions, is one of these.
+message EmulatorMessage {
+  // Absolute virtual time in NANOSECONDS since chip reset.
+  //
+  // This is the emulated systimer - the very same 16 MHz counter the guest
+  // firmware reads through esp_timer_get_time() - so the two processes agree on
+  // the timeline by construction, with no clock syncing. It is NOT host wall
+  // time and has no relation to it.
+  //
+  //   emu -> consumer: when the reported event happened.
+  //   consumer -> emu: when the requested event SHOULD happen. May be in the
+  //                    past, which is legal but lossy - see ClockSync.events_fired_late.
+  uint64 sim_time_ns = 1;
+
+  // Two messages stamped with the same sim_time_ns keep their order: every
+  // transport delivers in order, and the emulator applies same-time inputs in
+  // the order it received them.
+
+  oneof payload {
+    // emu -> consumer, on PUB.
+    ClockSync clock_sync = 2;
+    GpioLevel gpio_level = 3;
+
+    // Handshake, on ROUTER.
+    Register register = 4;         // consumer -> emu
+    RegisterAck register_ack = 5;  // emu -> consumer
+
+    // consumer -> emu, on ROUTER.
+    GpioDrive gpio_drive = 6;
+
+    // A transaction the guest waits on, on ROUTER both ways. See BusRequest.
+    BusRequest bus_request = 7;  // emu -> consumer
+    BusReply bus_reply = 8;      // consumer -> emu
+
+    // emu -> consumer, on PUB.
+    ChipReset chip_reset = 9;
+
+    // A serial line, on ROUTER both ways. See UartClaim.
+    UartTx uart_tx = 10;  // emu -> consumer
+    UartRx uart_rx = 11;  // consumer -> emu
+
+    // The waveform on a pad, on ROUTER. See PwmState.
+    PwmState pwm_state = 12;  // emu -> consumer
+
+    // A voltage on an analog pad, on ROUTER. See AnalogClaim.
+    AnalogDrive analog_drive = 13;  // consumer -> emu
+
+    // Sound, on ROUTER: what an I2S unit transmits and what it should
+    // receive. See I2sClaim.
+    I2sFormat i2s_format = 29;  // emu -> consumer
+    I2sOut i2s_out = 30;        // emu -> consumer
+    I2sIn i2s_in = 31;          // consumer -> emu
+
+    // A camera sensor on the DVP bus, on ROUTER. See DvpClaim.
+    DvpFormat dvp_format = 32;  // emu -> consumer
+    CamFrame cam_frame = 33;    // consumer -> emu
+
+    // A MIPI-DSI panel, on ROUTER. See DsiClaim.
+    DsiEvent dsi_event = 36;  // emu -> consumer
+    // The chip's EN (CHIP_PU) input, on ROUTER. See EnClaim.
+    EnDrive en_drive = 34;  // consumer -> emu
+    EnLevel en_level = 35;  // emu -> consumer, on PUB
+  }
+}
+
+// The chip reset. Broadcast on SIM/RESET, once per reset, to every registered
+// consumer, stamped with the first instant of the new timeline.
+//
+// Only the CHIP reset: the board did not. A consumer's own device keeps its
+// state, as a real sensor keeps its registers and a real button stays pressed
+// when the MCU next to it reboots. What the consumer drives on a pin stays
+// driven: the emulator re-applies every level a consumer last asked for, so
+// a line held low before the reset still reads low to the firmware after it,
+// and nothing has to be re-sent. What a consumer SCHEDULED is gone: a
+// sim_time_ns in the queue named a time on the old timeline, and the queue is
+// emptied (ClockSync does not count those as dropped). A consumer that holds
+// a deadline of its own compares it against a clock that has gone backwards
+// and should treat it as passed, or as void, as its device would.
+//
+// Carries the level of every pin as the chip drives it after the reset, in
+// the encoding of RegisterAck.pin_levels: every output the firmware had set
+// is released, so most pins are back to high. No GpioLevel is published for
+// those changes; this message is the whole word instead.
+message ChipReset {
+  uint64 pin_levels = 1;
+}
+
+// Broadcast on SIM/CLOCK once per simulated quantum (default 1 ms of virtual
+// time). Consumers use it to advance their own state machines.
+//
+// "Once per quantum" is an upper bound, not a guarantee of one per boundary.
+// Emulated time does not advance smoothly: a WFI fast-forward can jump several
+// milliseconds in one step, and every boundary it crossed collapses into the
+// single broadcast carrying the current time. Never infer elapsed time by
+// counting ClockSyncs -- read sim_time_ns.
+//
+// TIMING MODEL - read this before writing a consumer. The emulator is ADVISORY:
+// it broadcasts and keeps running. It does NOT wait for you to reply, and a
+// consumer that falls behind does not slow it down. The practical consequence
+// is that an event you schedule must be far enough ahead that your message
+// arrives before the virtual clock passes it. A few milliseconds is comfortable
+// because the emulator paces itself against wall time; a few microseconds is
+// not. When you lose that race the event still fires, just late, and
+// events_fired_late below tells you it happened.
+message ClockSync {
+  // Cumulative count of scheduled events whose sim_time_ns had already passed
+  // when the emulator dequeued them. Zero means every event you scheduled
+  // landed where you asked. A test that cares about timing should assert this
+  // is still zero at the end of the run.
+  uint64 events_fired_late = 1;
+
+  // Worst lateness observed so far, in nanoseconds. Pairs with the count above.
+  uint64 max_lateness_ns = 2;
+
+  // Broadcasts the emulator threw away because ITS OWN outbound queue was full
+  // -- nobody was collecting them. It drops rather than blocks or grows without
+  // bound, because the CPU loop must never stall on a model.
+  //
+  // Not a count of everything you missed: a transport may drop on its own
+  // before this, and that is not visible here.
+  uint64 broadcasts_dropped = 3;
+
+  // Scheduled events the emulator refused because the event queue was full
+  // -- somebody asked for too much.
+  //
+  // The queue is SHARED and bounded. When it is full, an incoming event is
+  // refused; an event already accepted is never removed to make room. So a
+  // model never loses an event it was not told about at send time, but a
+  // model that schedules heavily can fill the queue and get ANOTHER model's
+  // new events refused. This number is a total, not yours.
+  //
+  // Nonzero means somebody is scheduling deeper than this bus is built for.
+  // The fix is not a bigger queue: hold your own deadline and act on it when
+  // a ClockSync shows the clock has passed it.
+  uint64 scheduled_dropped = 4;
+}
+
+// One pin's line level changed. Published per pin on HW/GPIO/<pin>/LEVEL.
+//
+// For a pin some consumer named in GpioClaim.watch_pins: one message per
+// transition, in order, each stamped (sim_time_ns) with the time of the
+// transition itself, so a pulse the firmware drives and releases inside one
+// peripheral tick is two messages, each at its own time. The messages of one
+// tick go out together at its end, so they arrive up to a tick (256 CPU
+// cycles, ~1.6 us at 160 MHz) after their stamp; the stamp is within one
+// system-timer step (62.5 ns) of the transition.
+//
+// For any other pin: the level at the end of the tick, published when it
+// differs from the last. A pulse inside one tick is not seen there. Except a
+// pin some consumer named in GpioClaim.pwm_pins, while a PWM block toggles it
+// (a PwmState with high_ns between 0 and period_ns): its level is not
+// published then, since the tick would only sample the waveform, and PwmState
+// says what it is. When the waveform stops, or holds a level, the level is
+// published once, whatever it is: a consumer that registered meanwhile was
+// handed a sample of the waveform in RegisterAck.pin_levels.
+//
+// `level` is the line as the CHIP drives it: the output value where the chip
+// drives the pin, released-high where it does not. It deliberately does NOT
+// include levels driven by a consumer. If it did, you could not distinguish
+// "the chip released the line" from "the chip is driving the same value I am",
+// which is the distinction an open-drain bus is built on.
+message GpioLevel {
+  uint32 pin = 1;
+  bool level = 2;
+}
+
+// First message a consumer sends, on ROUTER. The emulator answers RegisterAck.
+message Register {
+  // Send ProtoVersion.PROTO_VERSION_CURRENT as generated from this file.
+  uint32 proto_version = 1;
+  // Free-form, for logs only. Name it after what it models ("button-gpio4").
+  string name = 2;
+
+  // What this consumer answers for. Empty is legal and means this peer only
+  // watches: it receives everything it subscribes to and is never asked to
+  // answer anything.
+  //
+  // This is how a board's wiring reaches the emulator without the emulator
+  // ever reading a board file. Whatever describes the board - a studio's
+  // diagram, a hand-written config - is turned into claims by whoever starts
+  // the consumers. The emulator learns only the routing facts: this peer
+  // drives that pin, answers for that I2C address on those pads, is the SPI
+  // device on that chip-select pad, the serial device on those two pads, or
+  // puts a voltage on that analog pad.
+  //
+  // Claims are exclusive and checked at handshake. Two consumers claiming the
+  // same pin, the same I2C address on the same pads, the same chip-select
+  // pad, or a pad the other's serial line names, is a wiring error, not
+  // a race to be resolved at runtime, so the second registration is REFUSED
+  // with the conflict named in RegisterAck.reject_reason. Refusal is
+  // all-or-nothing: one bad claim rejects the whole registration rather than
+  // leaving a peer half-attached and wondering which of its claims took.
+  repeated Claim claims = 3;
+}
+
+// How a part is wired, told to it before it registers. See PART_ABI.md.
+//
+// A part models a device, not a placement. A button is a button wherever it
+// sits; which pins it is bolted to is a fact about the BOARD, and the board is
+// described somewhere else — a studio's diagram, a test, a demo page. Baking a
+// pin number into a part would mean one module per placement, not one per
+// device.
+//
+// So the wiring arrives here, and the part's claims follow from it. Never sent
+// on either channel: whatever hosts the part hands it over before the part
+// builds its Register, because a part cannot say what it answers for until it
+// knows where it is.
+message PartConfig {
+  // The part's own pin names, mapped to the chip pin each is wired to:
+  // {"A": 9} for a button, {"SCL": 6, "SDA": 5} for an I2C sensor,
+  // {"CS": 7, "SCK": 6, "SO": 2} for an SPI one. Names rather
+  // than roles, because a part with two pins of one role has no other way to
+  // tell them apart. A name missing here is a pin the board left unconnected.
+  map<string, uint32> pins = 1;
+  // Not used: which I2C port a part is on follows from its pads (I2cClaim).
+  reserved 2;
+  reserved "bus";
+  // The 7-bit I2C address the board strapped the part to, for a device whose
+  // address pins choose between several. Zero means the part's own default,
+  // which for most devices is the only address the silicon has.
+  uint32 addr = 3;
+  // Not used: which SPI bus and chip-select slot a part is on follows from
+  // its chip-select pad (SpiClaim).
+  reserved 4;
+  reserved "cs_slot";
+  // The part's own pin names the board wired to the chip's EN (CHIP_PU) pin
+  // instead of a GPIO: ["RESET"] for a supervisor's reset output. Such a pin
+  // is not in `pins`, EN having no GPIO number; the part claims EN (EnClaim)
+  // and drives it with EnDrive.
+  repeated string en_pins = 5;
+}
+
+// What a part shows: its own state, for a page or a script to display. See
+// `part_state` in PART_ABI.md. Never sent on either channel: a host asks the
+// part for it on behalf of whoever is looking, as it hands the part an
+// interaction on behalf of whoever clicked.
+//
+// The emulator has no part in this. A pin's level is a fact about the chip
+// and travels as GpioLevel; what an LED on that pin looks like, what a sensor
+// is set to, what a display holds, is the part's own and travels here.
+message PartState {
+  // Named readings and indicators, in the part's own words: "pressed" ->
+  // "true", "temperature" -> "22.5", "lit" -> "false". The names are the
+  // part's, as its interactions are; a UI shows what it is given, and a
+  // script reads the ones it knows. A value is the plain decimal or word the
+  // part would print.
+  map<string, string> values = 1;
+}
+
+// One thing a consumer answers for. See Register.claims.
+message Claim {
+  oneof what {
+    GpioClaim gpio = 1;
+    I2cClaim i2c = 2;
+    SpiClaim spi = 3;
+    UartClaim uart = 4;
+    AnalogClaim analog = 5;
+    I2sClaim i2s = 17;
+    DvpClaim dvp = 18;
+    DsiClaim dsi = 20;
+    EnClaim en = 19;
+  }
+}
+
+// "I am the device at this address, on these two pads."
+//
+// Which I2C port the pads belong to is the firmware's choice, written into the
+// GPIO matrix (or IO_MUX) by its driver after every part has attached. So a
+// claim names pads, and the emulator works out the port from the routing the
+// firmware wrote, again whenever it changes. Until the driver has routed the
+// pads they resolve to no port, which is normal before it starts.
+//
+// A transaction to an address nobody claims on that port is NACKed at once,
+// without asking anyone: on real hardware nothing pulls SDA low and the master
+// sees a NACK within a byte time. That is also what makes a bus scan of a
+// modelled board find only the board's devices.
+//
+// A port with a claimed device is answered by parts alone. The emulator's own
+// devices -- the test EEPROM at 0x50 and any --i2c-dev register file -- are
+// not asked on it. A port nobody claims keeps them.
+message I2cClaim {
+  // 7-bit address, unshifted: the same encoding as I2cTransaction.addr. The
+  // pads are shared by every device on a bus, so they give the port and the
+  // address gives the device.
+  uint32 addr = 1;
+
+  // The pads this device is wired to. BOTH are required. Either alone would
+  // identify the port, but the two let the emulator check they resolve to the
+  // SAME port and report a device drawn across two.
+  //
+  // `optional` for presence, not for style: GPIO 0 is a real pad, so a bare
+  // uint32 could not tell it from a field nobody set, and a missing pad has to
+  // be refused rather than read as pin 0.
+  optional uint32 scl_pin = 2;
+  optional uint32 sda_pin = 3;
+}
+
+// "I am the SPI device on this chip select."
+//
+// A chip select is one pad per device, and the one thing a drawing knows for
+// certain, so it is the whole claim. Which GPSPI bus and which chip-select
+// slot the pad is, is the firmware's choice, written into the GPIO matrix (or
+// IO_MUX) when its driver adds the device, after every part has attached. The
+// emulator works the pair out from that routing, again whenever it changes.
+// Until the driver has routed the pad it resolves to nothing, which is normal
+// before it starts.
+//
+// A transfer on a chip select nobody claims is answered at once as an
+// undriven bus, without asking anyone: nothing drives MISO, so a read gets
+// 0xFF. A transfer that selects no single line (none, or several) names no
+// device and is answered the same way.
+message SpiClaim {
+  // `optional` for presence, as on I2cClaim: GPIO 0 is a real pad, and a
+  // claim without a chip select is refused rather than read as pin 0.
+  optional uint32 cs_pin = 1;
+
+  // The bus pads, if the drawing knows them. Corroboration only: the chip
+  // select already identifies the bus and the slot, so these are never needed
+  // to route and a device that lacks one is not refused -- a MAX6675 has no
+  // MOSI pin at all, and a write-only display has no MISO. What they buy is a
+  // board drawn with its chip select on one bus and its clock on another being
+  // told so.
+  optional uint32 clk_pin = 2;
+  optional uint32 mosi_pin = 3;
+  optional uint32 miso_pin = 4;
+  // The two extra data lines of a quad device (SIO2 = WP, SIO3 = HD), for a
+  // QSPI panel or flash. Corroboration only, like the three above.
+  optional uint32 wp_pin = 5;
+  optional uint32 hd_pin = 6;
+
+  // The level that selects the device: true for one selected by a high chip
+  // select (a 93C46 EEPROM), absent or false for the usual active-low one.
+  // Read only when the firmware drives the chip select as a plain GPIO
+  // (`spics_io_num = -1`): the pad then carries no controller chip select, so
+  // the emulator takes the bus from clk_pin or a data pin and routes each
+  // transfer to the device whose pad is at its selecting level as the
+  // transfer is clocked. A chip select the controller drives selects by its
+  // slot, and this is not consulted.
+  optional bool cs_active_high = 7;
+}
+
+// "I am the serial device on these two pads."
+//
+// Which UART the pads are is the firmware's choice (uart_set_pin), written
+// into the GPIO matrix (or IO_MUX) after every part has attached. The emulator
+// works the port out from that routing, again whenever it changes. Until the
+// driver has routed both pads to one port they resolve to none, which is
+// normal before it starts, and the part is sent nothing and heard from not at
+// all.
+//
+// Bytes cross, not pad edges: the UART block frames them, and a 115200-baud
+// line would be some 230,000 edges a second. Nothing parks. A transmitter
+// asks no question, so the chip never waits for a part, and a part that never
+// answers is a quiet device: the firmware sees its own read timeout, as on a
+// board.
+//
+// A port the emulator itself uses is not a part's: UART0 while it is the
+// console (not once the console is USB-Serial/JTAG or a USB CDC-ACM port),
+// and a port a --uart-tcp or --uart1-tcp bridge holds. Two readers of one
+// transmitter would each get part of what it sent. Such a claim is admitted
+// and routed as soon as the port is free, and said once while it is not. Two
+// devices whose pads land on one port: the one with the lower tx_pin is the
+// device, and the other is said once.
+//
+// One UartClaim per consumer: a UartRx names no port, so the emulator takes
+// it from the claim. A pad another consumer's UartClaim names is refused, in
+// either direction.
+message UartClaim {
+  // Named from the CHIP's end: tx_pin is the pad the chip transmits on, which
+  // is the pad the device receives on, and rx_pin the pad the chip receives
+  // on. A module's own labels run the other way (its TX goes to the chip's
+  // RX), so whoever turns a drawing into claims swaps them, once.
+  //
+  // BOTH are required, and must differ. `optional` for presence, as on
+  // I2cClaim: GPIO 0 is a real pad.
+  optional uint32 tx_pin = 1;
+  optional uint32 rx_pin = 2;
+}
+
+// "I am the audio device on these I2S data pads."
+//
+// As with every bus claim, the pads are named and the I2S unit is derived:
+// which unit a pad belongs to is the firmware's choice, written into the GPIO
+// matrix by its driver, and the emulator follows that routing whenever it
+// changes. Until the driver has routed a pad it resolves to no unit.
+//
+// The data pads are named from the CHIP's end. `dout_pin` is the pad the chip
+// transmits on: a speaker amplifier's or a codec's data input is wired to it,
+// and its claimant is sent I2sOut. `din_pin` is the pad the chip receives on:
+// a microphone's or a codec's data output drives it, and its claimant sends
+// I2sIn. At least one is required; a codec names both. `optional` for
+// presence: GPIO 0 is a real pad.
+//
+// `bclk_pin` and `ws_pin` are accepted and not used. The emulator puts no
+// clock on those pads: what a device needs of the clock arrives as I2sFormat.
+//
+// One consumer per data pad and direction, and one data pad per direction for
+// a consumer: I2sFormat, I2sOut and I2sIn name no pad, so a consumer with two
+// would not know which they were for. A second claim on a pad, or a second
+// pad of one direction, is refused. Two microphones sharing one data line,
+// each filling its own slot, is therefore one consumer supplying both slots.
+//
+// A unit whose data-in pad is claimed takes its samples from the consumer
+// alone: the transmitter the firmware may have looped back to it is not heard.
+message I2sClaim {
+  optional uint32 bclk_pin = 1;
+  optional uint32 ws_pin = 2;
+  optional uint32 dout_pin = 3;
+  optional uint32 din_pin = 4;
+}
+
+// What the samples of one direction look like. Sent to the pad's claimant
+// when it becomes known and again whenever it CHANGES, never per chunk: a
+// rate is programmed once and the samples do not stop.
+//
+// It is how a microphone learns what to supply, since no audio flows toward
+// it. For the receive direction it is sent only once the receiver is started
+// and its rate was decoded from the clock the firmware programmed; a rate the
+// emulator would have to guess (an APLL or external clock source) is not
+// sent, and the consumer has nothing to supply against. The transmit
+// direction is sent in that case too, at the emulator's fallback rate.
+message I2sFormat {
+  // false: what the chip transmits (I2sOut). true: what it expects to
+  // receive (I2sIn).
+  bool receive = 1;
+  // Frames per second: the frequency of the word-select line.
+  uint32 sample_rate_hz = 2;
+  // Slots in a frame. Standard stereo is 2, a TDM frame more.
+  uint32 channels = 3;
+  // Bits of one slot's CONTAINER: the data width in whole bytes, 8, 16, 24
+  // or 32. 24-bit samples travel in three bytes, as in the DMA buffer.
+  uint32 bits = 4;
+}
+
+// Samples the chip clocked out since the last message, for the claimant of
+// its data-out pad.
+//
+// The bytes are the wire's frames as the transmit I2sFormat describes them:
+// `channels` containers of `bits` each, interleaved, little-endian. A mono
+// transmitter's sample appears in every slot, as it does on the wire. No
+// framing: a message carries however much accumulated, usually one DMA
+// buffer, and a message boundary may fall inside a frame only if the
+// firmware's buffers do. A gap between messages is a gap in the sound.
+// sim_time_ns is when the last of these bytes had been clocked out.
+message I2sOut {
+  bytes pcm = 1;
+}
+
+// Samples for the chip's receiver, from the claimant of its data-in pad.
+//
+// In the layout the receive I2sFormat describes; nothing is converted, so
+// another layout is heard as noise. A device that fills one slot of a frame
+// sends zeros in the others.
+//
+// The receiver consumes at the rate of its I2sFormat, in emulated time. Send
+// audio as emulated time passes (ClockSync is the heartbeat) and stay a little
+// ahead: the emulator queues up to about 96 KiB, and past that it drops the
+// oldest, since audio the firmware has not reached is latency. A receiver
+// that finds the queue short waits 20 ms or two of its buffers, whichever is
+// longer, and then takes silence, so a consumer that stops does not block the
+// firmware's read. Applied when it arrives; sim_time_ns is not used. A stop
+// or reset of the receiver discards what is queued, so wait for the receive
+// I2sFormat before sending.
+message I2sIn {
+  bytes pcm = 1;
+}
+
+// "I put a voltage on this pad."
+//
+// An ADC channel is bonded to a fixed pad, so there is no matrix step: the
+// emulator looks the pad up in the chip's table (its adc_channel.h), and a
+// pad with no channel behind it is REFUSED. A wire to a pin that cannot
+// measure is a board error, and a part that quietly read nothing would look
+// like one reading 0 V. On a chip whose ADC is not modelled (P4, S3) every
+// pad is refused, and the reason says so.
+//
+// One source per pad: refused when another consumer holds the pad in an
+// AnalogClaim or in GpioClaim.drive_pins (and a GpioClaim naming a pad
+// another consumer holds here is refused too). The same consumer may claim
+// a pad both ways; the two levels stay apart, as below.
+message AnalogClaim {
+  uint32 pin = 1;
+}
+
+// "I am the camera sensor on these pads."
+//
+// A DVP sensor drives the pixel clock, VSYNC, DE (HREF on most sensors) and
+// the data lines; the chip's camera receiver samples them. The claim names
+// the pads, and the sensor is on the receiver's bus while the firmware routes
+// the receiver's pixel-clock input to `pclk_pin`: until its driver has done
+// that, and again if it lets the pad go, frames are refused.
+//
+// The pixel clock pad is the exclusive one: a second sensor on it is refused.
+// One sensor to a consumer, since DvpFormat and CamFrame name no pad. The
+// other pads are for the record: the emulator moves whole frames, not edges,
+// so nothing is driven on them. Exactly eight data pads, D0 first; a 16-bit
+// bus is not modelled.
+//
+// The sensor's control bus (SCCB) is I2C: claim its address with an I2cClaim
+// beside this one, and reset or power-down lines with a GpioClaim.
+message DvpClaim {
+  uint32 pclk_pin = 1;
+  uint32 vsync_pin = 2;
+  optional uint32 de_pin = 3;
+  optional uint32 hsync_pin = 4;
+  // The reference clock the chip may give the sensor; see DvpFormat.xclk_hz.
+  optional uint32 xclk_pin = 5;
+  repeated uint32 data_pins = 6;
+}
+
+// What the chip side of a DVP bus looks like to the sensor on it. Sent to the
+// claimant once the firmware has routed the pixel clock to its pad, and again
+// whenever it CHANGES, never per frame. A sensor whose pad the firmware lets
+// go is sent one with every field clear.
+//
+// It is the little the chip knows. The sensor is the clock master and owns
+// its geometry and format, which the firmware programs over SCCB; the pixels
+// come the other way, as CamFrame.
+message DvpFormat {
+  // The receiver is started and clocked. A frame that arrives while it is
+  // false is lost, as on the wire: send frames while it is true.
+  bool capturing = 1;
+  // 8, or 16 where the firmware asked for a two-byte bus (not modelled).
+  uint32 data_width = 2;
+  // The reference clock at the sensor's XCLK pin, 0 when the chip gives
+  // none: its clock is gated, or the board's sensor has its own oscillator
+  // and the firmware routed no XCLK. Not a reason to stop producing frames.
+  uint32 xclk_hz = 3;
+  // The polarities the firmware told the receiver to expect.
+  bool pclk_invert = 4;
+  bool vsync_invert = 5;
+  bool de_invert = 6;
+  // Counts the times the receiver has started capturing, from 1. A sensor
+  // puts the number it was last told into each CamFrame.
+  uint32 session = 7;
+}
+
+// A frame from the sensor, whole or in pieces.
+//
+// A message carries at most what the transport does (256 KiB over
+// --cosim-tcp), so a larger frame is sent as consecutive pieces, the last
+// with `end_of_frame`. Width, height and fourcc are read from that last piece.
+//
+// sim_time_ns of the last piece is when the frame starts, on the emulator's
+// clock: its VSYNC. The receiver starts it then, or at once if that has
+// passed, and its data follows after the vertical blanking, a sixteenth of
+// the frame period. 0 leaves the pacing to the emulator: one frame every
+// 1/15 s. A sensor that stamps its frames sets the frame rate by the gap
+// between stamps. A frame stamped before the receiver last started is lost:
+// it began for a receiver that was not there.
+//
+// A frame that arrives while the receiver is capturing is delivered, in
+// order, when it is due; one that arrives while it is not is lost. Up to four
+// wait; past that the oldest is dropped, since a camera's backlog is latency.
+// Send a frame when the last one's time has come (ClockSync is the
+// heartbeat), not as fast as the socket takes them.
+message CamFrame {
+  bytes data = 1;
+  bool end_of_frame = 2;
+  uint32 width = 3;
+  uint32 height = 4;
+  // Four ASCII characters in written order, little-endian, as V4L2 spells
+  // them: 'JPEG'; 'RGBP' and 'RGBR' (RGB565, high and low byte first);
+  // 'UYVY', 'YUYV', 'YVYU', 'VYUY'; 'GREY'. 0 means 'JPEG'. Any other is
+  // passed through unchecked.
+  //
+  // A raw frame must be exactly width * height * bytes-per-pixel long: the
+  // camera driver reports its buffer's size for one whatever arrived, so a
+  // short frame would be invisible to firmware. It is refused instead.
+  fixed32 fourcc = 5;
+  // DvpFormat.session as the sensor last heard it. A frame sent for an
+  // earlier session is lost: a sensor learns of a stop after the emulator
+  // has moved on, and its frames for the old session may arrive in the new
+  // one, after the firmware has reprogrammed it. 0 skips the check.
+  uint32 session = 6;
+}
+
+// "I drive these pins."
+//
+// Bit N = GPIO N, the same encoding as RegisterAck.pin_levels. A claim makes
+// the pin exclusive: once claimed, a GpioDrive on it from any other peer is
+// dropped, so two models cannot fight over one line. A pin nobody claims may
+// be driven by any registered peer.
+//
+// OBSERVING a pin at tick resolution needs no claim: every pin's level is
+// published to whoever subscribes, once per peripheral tick when it differs.
+// The exception is a pad an I2S frame clock (WS) is on: the tick would sample
+// every edge of it, so its level is published only while some consumer
+// watches it, and once when the clock stops.
+// `watch_pins` asks for more: every transition of those pins, each at its own
+// time, so a pulse inside one tick is two messages. Not exclusive, any pin,
+// including one this consumer drives. An LED model should watch its pin and
+// claim nothing else; a WS2812 or a logic view cannot do without it.
+//
+// `pwm_pins` asks for the waveform rather than its edges: a PwmState when what
+// a PWM block puts on the pin changes. Not exclusive, any pin. A servo, a
+// buzzer, a dimmed LED or a motor driver names its pin here.
+message GpioClaim {
+  uint64 drive_pins = 1;
+  uint64 watch_pins = 2;
+  uint64 pwm_pins = 3;
+}
+
+// "I am wired to the chip's EN (CHIP_PU) pin and may pull it low."
+//
+// EN is the chip's reset input, not a GPIO: a supervisor, a windowed
+// watchdog, a reset button or a host MCU pulls it low to reset the chip. The
+// claim is not exclusive. Those devices drive the line open-drain against one
+// pull-up, so several consumers may claim it and the line is low while any
+// of them holds it low.
+//
+// A consumer that goes away lets go of the line. One that never claimed it
+// has its EnDrive ignored.
+message EnClaim {}
+
+// Drive EN, at EmulatorMessage.sim_time_ns, scheduled as a GpioDrive is.
+//
+// level false pulls the line low, and the chip is held in reset: it runs
+// nothing, drives no pin (every pin reads released, each change published as
+// a GpioLevel) and asks for no bus transaction. Emulated time goes on, on the
+// same timeline: ClockSync keeps coming and what is scheduled stays
+// scheduled, so the hold can be let go by an EnDrive queued beforehand.
+//
+// level true lets go. When no consumer and no host control holds the line
+// low any more, the chip leaves reset as it leaves power-on: one ChipReset,
+// a new timeline, and firmware that reads the power-on reset reason. Letting
+// go of a line this consumer does not hold low is nothing.
+//
+// The line belongs to the board, so a chip reset from any other cause does
+// not move it: a chip reset while EN is low stays held.
+message EnDrive {
+  bool level = 1;
+}
+
+// The level of the chip's EN (CHIP_PU) pin, broadcast on SIM/EN when it
+// moves, to every registered consumer whether or not it claims the pin.
+//
+// level false: something pulled EN low at sim_time_ns and the chip is in
+// reset from then on. level true: the last holder let go at sim_time_ns, the
+// last instant of the old timeline; the ChipReset that follows starts the new
+// one. So a part that pulled EN low sees its own pulse come back, and one that
+// only watches (a status LED, a second supervisor) sees the line another
+// part, or the host, moved. RegisterAck.en_low is the level at attach.
+message EnLevel {
+  bool level = 1;
+}
+
+message RegisterAck {
+  uint32 proto_version = 1;
+  // The emulated part, as passed to --chip: "esp32c3", "esp32p4", ...
+  string chip = 2;
+  // Highest usable GPIO number plus one. Pins beyond this are rejected.
+  uint32 pin_count = 3;
+  uint64 quantum_ns = 4;
+  // False means every other field except reject_reason is unset, and the
+  // emulator WILL ignore anything else this consumer sends. This is enforced,
+  // not advisory: commands from a peer that never registered, or whose
+  // registration was refused, are dropped. Do not proceed on a refusal.
+  //
+  // Causes: a proto_version mismatch, too many consumers, a claim the chip
+  // cannot honour (a pin it does not have, an address above 0x7F, an SPI claim
+  // with no chip select, an I2S claim with no data pad), or a claim
+  // that collides with one an earlier peer already holds.
+  bool accepted = 5;
+  string reject_reason = 6;
+  // Line level of every pin at the instant of accept, bit N = GPIO N, in the
+  // same released-high encoding as GpioLevel. A consumer attaching mid-run
+  // needs this: it would otherwise assume the reset state and stay wrong about
+  // any pin the firmware drove during init until that pin next moved.
+  uint64 pin_levels = 7;
+  // True when the chip's EN pin is low at the instant of accept: the chip is
+  // held in reset, and pin_levels is every pin released. See EnLevel.
+  bool en_low = 8;
+}
+
+// Drive an input pin, at EmulatorMessage.sim_time_ns. Sent on ROUTER.
+//
+// The emulator holds this in a priority queue and applies it when its virtual
+// clock reaches that time, shortening the CPU batch so it lands within one
+// peripheral tick rather than at the next quantum boundary. Scheduling into the
+// future is the intended use; that is what makes the timing precise.
+//
+// If sim_time_ns has already passed when the message is dequeued, the event
+// fires immediately and is counted in ClockSync.events_fired_late.
+//
+// A model drives a LEVEL, nothing more. Whether that becomes an interrupt is
+// the chip's business: an ISR runs only if the guest configured INT_TYPE and
+// INT_ENA on this pin. There is deliberately no way to inject an interrupt
+// directly — every chip re-derives its interrupt lines from peripheral state
+// each tick, so an injected one would be erased within 256 cycles.
+message GpioDrive {
+  uint32 pin = 1;
+  bool level = 2;
+}
+
+// What the chip transmitted on a port, sent on ROUTER to the consumer that is
+// the device on it, and to no other: a serial line is point to point.
+//
+// In order, as it left the TX FIFO since the last one, at most 128 bytes a
+// message (the hardware FIFO's depth): a longer burst is several messages, so
+// a frame may arrive in two and two frames in one. sim_time_ns is when it was
+// taken off the FIFO; the model gives TX no line time, so bytes written
+// together arrive together. What the chip transmits before the firmware routes
+// the port to the part's pads reaches no device, as on a board, and is never
+// sent.
+message UartTx {
+  uint32 port = 1;  // IDF uart_port_t, for logs: the consumer is already the port's
+  bytes data = 2;
+}
+
+// Bytes the device sends the chip, on ROUTER. They go to the port the
+// sender's pads resolve to, and are dropped while they resolve to none (the
+// driver has not run yet), as a line nobody listens to.
+//
+// Applied when they arrive, whatever sim_time_ns says: a device that answers
+// later sends its answer later. They enter the RX FIFO 128 bytes at a time,
+// each next 128 no sooner than their time at the programmed baud rate or
+// 65,536 CPU cycles, whichever is less, so a burst lands faster than the wire
+// would carry it but never overruns the FIFO. Past a 64 KB backlog the
+// firmware has not taken they are dropped, as a receiver nobody reads
+// overflows.
+message UartRx {
+  bytes data = 1;
+}
+
+// The waveform a PWM block (LEDC, or an MCPWM generator) puts on a pin some
+// consumer named in GpioClaim.pwm_pins, in nanoseconds of emulated time. Sent
+// on ROUTER to each such consumer when it changes, not periodically: a steady
+// waveform is one message however long it runs, and a consumer keeps what it
+// was told. A servo reads high_ns, a buzzer period_ns, a lamp or a motor
+// driver their ratio.
+//
+// What changes it: a register write, a hardware fade's step (no write at all,
+// so a consumer reading registers would miss it), the clock or the divider,
+// the routing, a stop. Each service pass compares, so a change is sent at most
+// one peripheral tick after it, stamped (sim_time_ns) with the pass; a fade is
+// seen at the passes, not at each step, and its last state is always sent.
+// After one is sent, the next for the same pin waits out the rest of a quantum
+// (RegisterAck.quantum_ns) and is then the waveform at that time, so a fast
+// fade is at most one message a quantum.
+//
+// A consumer that registers is told in the pass that accepts it, right after
+// its RegisterAck, if the pin carries a waveform; one never driven is never
+// sent period 0. After a chip reset every
+// pin a consumer was told about is told again, period 0 while the firmware
+// boots. A message the link refuses is sent again.
+//
+// The summary is of the pin as the chip drives it, after the GPIO matrix's
+// output invert, and agrees with the edges a watch_pins consumer gets. What it
+// leaves out: the phase (an LEDC hpoint, an MCPWM pair's offset), dead-time
+// delays (not modelled on the pin either), and actions from events outside
+// the timer's own cycle (MCPWM fault and sync triggers). A consumer that needs
+// the shape names the pin in watch_pins as well.
+message PwmState {
+  uint32 pin = 1;
+  // One period. Zero: no waveform this message describes. The block's output
+  // is off or its timer stopped, held or unclocked, the pin does not carry a
+  // PWM block's signal, or the output is not one pulse a period (an MCPWM
+  // generator going high twice). The pin's level is then GpioLevel's.
+  uint64 period_ns = 2;
+  // How long the pin is high in one period. Zero is a pin held low, and equal
+  // to period_ns one held high, both while the block's timer runs.
+  uint64 high_ns = 3;
+}
+
+// The voltage on a pad the sender claimed (AnalogClaim), in millivolts, on
+// ROUTER. Held until the next one. Applied at sim_time_ns, through the same
+// queue as a GpioDrive: a stamp already past applies at once. Above 3300 mV,
+// the pad's supply, it is taken as 3300 and said once per pad.
+//
+// Millivolts, not counts: the attenuation and the code are the firmware's
+// and the chip's business. A conversion of the pad reads this voltage at the
+// attenuation the firmware picked; with no AnalogDrive the pad reads what its
+// own pull gives, or the converter's undriven word.
+//
+// Held across everything. A chip reset rebuilds the converter and the
+// emulator puts every held voltage back; the part is not asked again. A
+// part that detaches leaves its voltage on the pad, as a device leaves a
+// level on a wire.
+//
+// Analog and digital stay apart: this does not move the pad's digital input
+// level, and a GpioDrive does not reach the converter. IDF's ADC driver
+// turns the pad's input buffer and pulls off.
+//
+// Sent by a consumer that does not claim the pad, it is dropped and said.
+message AnalogDrive {
+  uint32 pin = 1;
+  uint32 millivolts = 2;
+}
+
+// A bus transaction the guest waits on.
+//
+// Sent on ROUTER to the one consumer whose claim names the address or the
+// chip select, and to no other: two of one device on two ports share an
+// address, and each would otherwise act on the other's commands. A request is
+// never sent for an address or a chip select nobody claims; the emulator
+// answers those itself, as a NACK or as an undriven bus.
+//
+// An SPI transfer with rx_len 0 is sent too, and is the exception to what
+// follows: it reads nothing, so it has already completed when it is sent and
+// the guest is not waiting on it. A device that only listens -- a display, a
+// DAC -- still has to see what was written. Do not answer it: an answer is
+// refused like any reply to a request that is not out.
+//
+// The emulator withholds the peripheral's completion interrupt, so the guest
+// waits exactly as it would on real hardware: in the poll loop its driver
+// already has, or asleep on the semaphore it already uses. Nothing blocks
+// inside the guest's store instruction.
+//
+// THE EMULATOR STOPS while a transaction is out. No emulated time passes
+// between the request going out and the reply coming back, so the guest sees
+// the same timing however long the host took to deliver the answer. Take as
+// long as you need: a slow consumer costs wall time, never firmware behaviour.
+// But you MUST answer. Nothing answers on your behalf, because a made-up reply
+// would hide a broken device model behind a plausible value. A host that has
+// had no answer for 5 s of wall time names the device that did not answer and
+// stops, and one that knows the part cannot answer (it has failed) stops at
+// once.
+//
+// The answer reaches the guest once the bus would have finished clocking the
+// transaction at the speed the firmware programmed, and the guest runs through
+// that wait as it would on hardware. Nothing is added to any clock.
+message BusRequest {
+  // Quote this back in the reply. It names this request and no other: no two
+  // requests in a run share one, so a second answer to a request, or one to a
+  // request from before a chip reset, matches nothing and is refused.
+  uint64 correlation_id = 1;
+  oneof op {
+    I2cTransaction i2c = 2;
+    SpiTransfer spi = 3;
+  }
+}
+
+// The answer to a BusRequest, sent on ROUTER. Only the consumer the request
+// went to may answer it; a reply from any other is refused.
+message BusReply {
+  uint64 correlation_id = 1;
+  // False: no device answered. On I2C a NACK, which the IDF driver reports as
+  // ESP_ERR_NOT_FOUND from i2c_master_probe and as a failed transfer
+  // otherwise. On SPI, where nothing acknowledges, a MISO nobody drives: the
+  // read gets 0xFF. An I2C device that is there and has nothing to send ACKs
+  // with no data; an SPI read is answered with its rx_len bytes.
+  bool ack = 2;
+  // The bytes read: read_len (I2C) or rx_len (SPI) of them, in the order they
+  // were clocked. Fewer are padded with 0xFF, what a master reads from a line
+  // nobody drives; more are dropped. Either is logged. Ignored for a
+  // write-only I2C transaction.
+  bytes data = 3;
+  // Which kind of transaction this answers: echo the BusRequest's op, so
+  // BUS_OP_I2C for an I2C transaction and BUS_OP_SPI for an SPI transfer. It
+  // picks the bus the reply is offered
+  // to, and that bus then checks a request of its own is out under
+  // correlation_id, so a reply to a question nobody asked is refused rather
+  // than raising an interrupt out of nowhere. A reply without it is refused.
+  BusOp op = 4;
+}
+
+// Companion to BusReply.op.
+enum BusOp {
+  BUS_OP_UNSPECIFIED = 0;
+  BUS_OP_I2C = 1;
+  BUS_OP_SPI = 2;
+}
+
+// One logical I2C transaction. See BusRequest.
+//
+// The controller's FIFO holds 32 bytes, so a driver sends a transaction that
+// does not fit as several command lists, each ending where it refills the
+// FIFO. The pieces of a write are joined: `write` is every byte the master
+// clocked out, so a register read is one transaction, the register in
+// `write` and the length in `read_len`.
+//
+// A read split that way arrives as several requests, because the device
+// answers each piece before the master asks for the next. The first carries
+// the write bytes and the first piece; each later one has `continues` set, no
+// write bytes, and the next piece, and the device answers from where its read
+// left off, as it does on the wire: no START or address reached it in
+// between. esp_driver_i2c splits a read of 32 bytes or more; the legacy
+// driver (driver/i2c.h) splits every READ, so its 6-byte read with the last
+// byte NACKed arrives as 5 bytes and then 1. A NACK of a continuing piece
+// reads as an undriven line, 0xFF: a device cannot NACK the master's read.
+//
+// A transaction with no write bytes and no read is a probe
+// (i2c_master_probe): ACK it if the device is there.
+message I2cTransaction {
+  uint32 bus = 1;        // IDF i2c_port_t: 0, or 1 where the chip has two
+  uint32 addr = 2;       // 7-bit address, unshifted
+  bytes write = 3;       // bytes the master clocked out
+  uint32 read_len = 4;   // bytes the master expects back; 0 = write-only
+  bool continues = 5;    // the next piece of the read before it; see above
+}
+
+// One SPI transfer, as the master clocked it. See BusRequest.
+//
+// cs_slot is decoded from the peripheral's MISC register, where the selected
+// line is the one CS*_DIS bit still clear. A request only goes to the part
+// whose chip-select pad resolves to (bus, cs_slot), so a part that claims one
+// chip select needs neither field to know the transfer is its own.
+message SpiTransfer {
+  uint32 bus = 1;        // GPSPI instance: 2 or 3 (SPI2_HOST, SPI3_HOST)
+  uint32 cs_slot = 2;    // the chip-select line, 0..5; not a pad number
+  // The data phase the master clocked out, a DMA write's bytes as well as a
+  // CPU one's. Empty for a transfer with no write phase. A full-duplex read
+  // clocks one anyway: it carries what the controller's buffer held, or
+  // nothing after a DMA write on the bus.
+  bytes tx = 3;
+  // Bytes the master reads back, into its W registers or through DMA alike.
+  // 0 = a write: it completed already, and nothing waits for an answer.
+  uint32 rx_len = 4;
+
+  // Every pin's level AT THE MOMENT THIS TRANSFER WAS CLOCKED. Bit N = GPIO N,
+  // the same encoding as RegisterAck.pin_levels.
+  //
+  // Needed because some devices carry a transfer's MEANING on a pin rather
+  // than on the wire. An ST7789 has no address and no control byte: D/C low is
+  // a command, D/C high is pixel data, and the driver toggles it microseconds
+  // before each transfer. A part following the GpioLevel stream sees the level
+  // as of the end of the emulator's pass, which for a display is "data" every
+  // time; this is the level as the transfer was clocked.
+  uint64 pin_levels = 5;
+
+  // ---- Framing and line widths. A part that ignores all of it still gets
+  // the data phase in `tx`. ----
+  //
+  // A half-duplex transfer is CMD + [ADDR] + [DUMMY] + [DATA], each phase on
+  // 1, 2, 4 or 8 lines (ESP32-C3 TRM section 27.5.8.4). IDF uses the command and address
+  // phases when a device is added with `command_bits` / `address_bits`, and
+  // multi-line phases for SPI_TRANS_MODE_DIO/QIO/OCT and
+  // SPI_TRANS_MULTILINE_CMD/ADDR. The wire order is cmd, addr, dummy, tx.
+  //
+  // `esp_lcd` QSPI panels (ST77916, CO5300, SH8601) use NEITHER phase: the
+  // 32-bit opcode word (0x02 / 0x32, 0x00, lcd_cmd, 0x00) is sent as a
+  // one-line DATA transfer with cs_keep_active set, and the pixels follow as
+  // a separate DATA transfer on four lines. A panel part therefore sees the
+  // opcode at the start of `tx`, and joins the two transfers by
+  // cs_keep_active.
+
+  // The command phase, if the transfer has one.
+  SpiPhase cmd = 6;
+  // The address phase, if the transfer has one.
+  SpiPhase addr = 7;
+  // SCK cycles between address and data; nothing is driven. 0 = none.
+  uint32 dummy_cycles = 8;
+  // Lines the data-out phase (`tx`) and the data-in phase (the reply) are
+  // clocked on: 1, 2, 4 or 8. Bytes are bytes whatever the width -- a part
+  // never de-interleaves lines to get them; see line_pins for which pad
+  // carried which line.
+  uint32 tx_lines = 9;
+  uint32 rx_lines = 10;
+  // Command, address and `tx` bytes leave LSB first (SPI_DEVICE_TXBIT_LSBFIRST).
+  // Default false: MSB first, bit 7 of each byte on the wire first.
+  bool lsb_first = 11;
+  // Chip select stays asserted after this transfer, so the next transfer on
+  // the same device continues the same device-level frame
+  // (SPI_TRANS_CS_KEEP_ACTIVE). A QSPI panel's opcode word and its pixels are
+  // two transfers joined this way.
+  bool cs_keep_active = 12;
+  // The pad (GPIO number) carrying each data line SIO0.. of the widest phase
+  // in this transfer: SIO0 = D/MOSI, SIO1 = Q/MISO, SIO2 = WP, SIO3 = HD,
+  // SIO4..7 = IO4..7. 0xFFFFFFFF = that line reaches no pad. As long as the
+  // widest phase needs, and never shorter than two: a 1-line transfer lists
+  // SIO0 and SIO1. On each SCK cycle of an N-line phase, MSB first, the first
+  // of the next N bits goes on the highest line (4-bit: HD=B7, WP=B6, Q=B5,
+  // D=B4, then B3..B0) -- TRM Table 27.5-5; LSB first reverses the order
+  // within the byte.
+  repeated uint32 line_pins = 13;
+  // 3-wire half-duplex (SPI_DEVICE_3WIRE): a one-line phase uses SIO0 (D) in
+  // both directions, so the reply to a one-line read comes in on D, not Q.
+  bool three_wire = 14;
+}
+
+// One command or address phase, as the master clocked it.
+message SpiPhase {
+  // Length in bits: 1..16 for a command, 1..32 for an address.
+  uint32 bits = 1;
+  // Lines: 1, 2, 4 or 8.
+  uint32 lines = 2;
+  // The bits in wire order, packed like `tx`: bytes in the order sent, each
+  // MSB first unless lsb_first. A partial last byte sends its first
+  // bits % 8 bits in that order (the high bits when MSB first).
+  bytes data = 3;
+}
+
+// "I am the panel on this virtual channel of the DSI link."
+//
+// The one claim that names no pads: the DSI lanes are dedicated pads outside
+// the GPIO matrix and there is one DSI host, so nothing the firmware does
+// routes a lane and there is nothing to resolve. What tells two devices on
+// one link apart is the virtual channel, the two bits every DSI packet header
+// carries. Exclusive per channel. Refused on a chip with no DSI host.
+//
+// A panel's other lines -- reset, backlight -- are GPIOs, claimed or watched
+// the ordinary way.
+message DsiClaim {
+  uint32 virtual_channel = 1;  // 0..3; esp_lcd's DBI/DPI `virtual_channel`
+}
+
+// Everything the DSI host sends a panel, as one message kind: a command, the
+// video stream's format, or rows of a frame.
+message DsiEvent {
+  oneof what {
+    DsiCommand command = 1;
+    DpiFormat format = 2;
+    DpiRows rows = 3;
+  }
+}
+
+// One packet the host sent through its generic interface to this panel's
+// virtual channel: a DCS command, a generic write, a read request. Delivered
+// as sent, in order; what a vendor register means is the panel's business.
+//
+// A panel that attaches after the firmware brought it up is first sent the
+// packets it missed (the last 256 on the link), so it leaves sleep as it
+// would have.
+//
+// A read is answered by the emulator, with zeros: the HAL spins on the read
+// FIFO, and a panel across this boundary answers too late. The panel sees the
+// request and may ignore it.
+message DsiCommand {
+  // The MIPI data type: 0x05 DCS short write, 0x15 with one parameter, 0x39
+  // DCS long write, 0x03/0x13/0x23/0x29 generic writes; 0x04/0x14/0x24
+  // generic and 0x06 DCS reads.
+  uint32 dt = 1;
+  // A short packet's two header bytes (command, parameter), or a long
+  // packet's payload (command, then its parameters).
+  bytes data = 2;
+}
+
+// How the pixels in DpiRows lie: the frame buffer's own bytes, in memory
+// order.
+enum DpiPixelFormat {
+  DPI_PIXEL_FORMAT_UNSPECIFIED = 0;
+  // 16-bit RGB565 words, little-endian: esp_lcd and LVGL write a DPI frame
+  // buffer as native uint16_t, unlike an SPI panel's stream, which goes out
+  // high byte first.
+  DPI_PIXEL_FORMAT_RGB565_LE = 1;
+  // Three bytes a pixel: blue, green, red (IDF's color_pixel_rgb888_data_t,
+  // LVGL's RGB888).
+  DPI_PIXEL_FORMAT_BGR888 = 2;
+}
+
+// The shape of the video stream. A diff: sent when it changes. Taken from
+// the bridge's registers, never from a frame's length. A stream the emulator
+// does not carry (RGB666, YUV) is not described at all.
+message DpiFormat {
+  // DPI output on and the frame clock running. False: the stream stopped,
+  // and what the glass shows is the panel's business.
+  bool streaming = 1;
+  uint32 width = 2;
+  uint32 height = 3;
+  DpiPixelFormat format = 4;
+}
+
+// Rows of the frame that changed since the last frame this panel was sent.
+//
+// A DPI link re-sends the whole picture every VSYNC, so the emulator sends
+// only the rows that differ from what the panel last saw: a still screen
+// sends nothing. The first frame after the panel attaches, after a chip
+// reset or after the format changes is sent whole. In pieces of at most
+// 64 KiB of pixels, always whole rows.
+message DpiRows {
+  // Which frame: a number that goes up with every frame, the same on all of
+  // one frame's rows, which are sent together and in order.
+  uint64 frame = 1;
+  // First row and how many; `pixels` is exactly `rows` rows of DpiFormat's
+  // width, in its format.
+  uint32 y = 2;
+  uint32 rows = 3;
+  bytes pixels = 4;
+}

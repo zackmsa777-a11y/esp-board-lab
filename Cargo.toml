@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/firmware", "crates/cli"]
-exclude = ["app"]
+exclude = ["app", "parts"]
 resolver = "2"
 
 [workspace.package]
