@@ -1,0 +1,40 @@
+name: Parts
+on:
+  push:
+    paths:
+      - 'parts/**'
+      - 'boards/**'
+      - 'vendor/esp-part-sdk/**'
+      - 'scripts/build-parts.mjs'
+      - '.github/workflows/parts.yml'
+  pull_request:
+    paths:
+      - 'parts/**'
+      - 'boards/**'
+      - 'vendor/esp-part-sdk/**'
+      - 'scripts/build-parts.mjs'
+      - '.github/workflows/parts.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: cargo test --manifest-path parts/Cargo.toml
+      - run: cargo clippy --manifest-path parts/Cargo.toml --all-targets -- -D warnings
+      - run: node scripts/build-parts.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: virtual-parts-and-boards
+          path: |
+            app/public/parts
+            app/public/boards
+          if-no-files-found: error

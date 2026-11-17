@@ -1,0 +1,42 @@
+{
+  "parts": {
+    "display": {
+      "module": "st7789.wasm",
+      "pins": {
+        "CS": 41,
+        "DC": 16,
+        "SCK": 11,
+        "MOSI": 9,
+        "BL": 21
+      }
+    },
+    "encoder": {
+      "module": "ky040.wasm",
+      "pins": {
+        "CLK": 4,
+        "DT": 5,
+        "SW": 0
+      }
+    },
+    "key": {
+      "module": "pushbutton.wasm",
+      "pins": {
+        "A": 6
+      }
+    },
+    "charger": {
+      "module": "bq25896.wasm",
+      "pins": {
+        "SCL": 18,
+        "SDA": 8
+      }
+    },
+    "gauge": {
+      "module": "bq27220.wasm",
+      "pins": {
+        "SCL": 18,
+        "SDA": 8
+      }
+    }
+  }
+}

@@ -1,0 +1,13 @@
+# Espressif virtual part example, Apache-2.0; adapted to this workspace.
+[package]
+name = "pushbutton"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+esp-part = { path = "../../vendor/esp-part-sdk/esp-part" }

@@ -13,6 +13,7 @@ function emulatorAssets(): Plugin {
       for (const file of ['esp_emu.js', 'esp_emu_bg.wasm']) {
         copyFileSync(fileURLToPath(new URL(`../vendor/esp-emu-wasm/pkg/${file}`, import.meta.url)), `${destination}/${file}`);
       }
+      copyFileSync(fileURLToPath(new URL('../vendor/esp-emu-wasm/vendor/esp_cosim_pb.js', import.meta.url)), `${destination}/esp_cosim_pb.js`);
     },
   };
 }

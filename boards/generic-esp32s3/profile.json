@@ -1,0 +1,6 @@
+{
+  "id": "generic-esp32s3",
+  "name": "Generic ESP32-S3",
+  "chip": "esp32s3",
+  "board": "board.json"
+}

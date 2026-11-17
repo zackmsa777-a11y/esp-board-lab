@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
-import type { Chip, Snapshot } from './emu/loop';
+import type { Snapshot } from './emu/loop';
 import type { WorkerCommand, WorkerEvent } from './emu/protocol';
-
-const boards: { label: string; chip: Chip }[] = [
-  { label: 'LilyGO T-Embed CC1101 Plus (esp32s3)', chip: 'esp32s3' },
-  { label: 'Generic ESP32-S3', chip: 'esp32s3' },
-  { label: 'Generic ESP32-C3', chip: 'esp32c3' },
-];
+import { loadBoard, loadProfiles } from './boards';
+import type { Profile } from './boards/types';
+import type { DisplayFrame, PartSnapshot } from './emu/parts/host';
+import { detectBoard } from './detect';
+import { Device } from './Device';
 
 export function App() {
-  const [board, setBoard] = useState(0);
+  const [profiles, setProfiles] = useState<Profile[]>([]);
+  const [board, setBoard] = useState('');
+  const [detected, setDetected] = useState('');
+  const [parts, setParts] = useState<PartSnapshot[]>([]);
+  const [frame, setFrame] = useState<DisplayFrame | null>(null);
   const [ready, setReady] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -26,6 +29,12 @@ export function App() {
   const loadSequence = useRef(0);
   const send = useCallback((message: WorkerCommand, transfer: Transferable[] = []) => {
     worker.current?.postMessage(message, transfer);
+  }, []);
+  const partInput = useCallback((part: string, input: string) => send({ type: 'part_input', part, input }), [send]);
+  useEffect(() => {
+    let alive = true;
+    void loadProfiles().then(items => { if (alive) { setProfiles(items); setBoard(items.find(item => item.display)?.id ?? items[0]?.id ?? ''); } }).catch(cause => { if (alive) setError(`Could not load board profiles: ${String(cause)}`); });
+    return () => { alive = false; };
   }, []);
 
   useEffect(() => {
@@ -48,6 +57,8 @@ export function App() {
       switch (data.type) {
         case 'ready': setReady(true); break;
         case 'loaded': setLoaded(true); setBusy(false); setError(''); break;
+        case 'parts': setParts(data.parts); break;
+        case 'frame': setFrame(data.frame); break;
         case 'uart': term.write(data.text); break;
         case 'status':
           setSnapshot(data.status);
@@ -63,11 +74,15 @@ export function App() {
     };
   }, [send]);
 
-  const loadBytes = useCallback((bytes: ArrayBuffer, chip: Chip) => {
+  const loadBytes = useCallback(async (bytes: ArrayBuffer, profile: Profile) => {
     setBusy(true); setLoaded(false); setSnapshot(null); setError('');
+    setFrame(null); setParts([]);
     terminal.current?.reset();
-    const transferred = bytes.slice(0);
-    send({ type: 'load', chip, firmware: transferred }, [transferred]);
+    try {
+      const definition = await loadBoard(profile);
+      const transferred = bytes.slice(0);
+      send({ type: 'load', chip: profile.chip, firmware: transferred, profile, board: definition }, [transferred]);
+    } catch (cause) { setBusy(false); setError(`Could not load board: ${String(cause)}`); }
   }, [send]);
 
   const loadFile = async (file?: File) => {
@@ -80,11 +95,18 @@ export function App() {
       const bytes = await file.arrayBuffer();
       if (sequence !== loadSequence.current) return;
       firmware.current = bytes; setFilename(file.name);
-      loadBytes(bytes, boards[board].chip);
+      const detection = await detectBoard(new Uint8Array(bytes), profiles);
+      if (sequence !== loadSequence.current) return;
+      const selected = profiles.find(item => item.id === detection.profileId) ?? profiles.find(item => item.id === board) ?? profiles[0];
+      if (!selected) throw new Error('No board profiles available');
+      setBoard(selected.id);
+      setDetected(detection.profileId ? `Detected: ${selected.name}${detection.hints.length ? ` (${detection.hints.join(', ')})` : ''}` : '');
+      await loadBytes(bytes, selected);
     } catch (cause) { setBusy(false); setError(`Could not read firmware: ${String(cause)}`); }
   };
 
-  const chip = boards[board].chip;
+  const profile = profiles.find(item => item.id === board);
+  const chip = profile?.chip ?? 'esp32s3';
   const state = error ? (snapshot?.faulted ? 'Faulted' : 'Error') : busy ? 'Loading' : !ready ? 'Starting' : snapshot?.running ? 'Running' : loaded ? 'Paused' : 'Ready';
   const gpio = snapshot?.gpio_state;
   return (
@@ -96,12 +118,13 @@ export function App() {
         <h1>ESP Board Lab</h1>
         <div className="board-control"><label htmlFor="board">Board</label>
           <select id="board" value={board} disabled={busy} onChange={event => {
-            const next = Number(event.target.value); setBoard(next);
-            if (firmware.current) loadBytes(firmware.current, boards[next].chip);
-          }}>{boards.map((item, index) => <option key={index} value={index}>{item.label}</option>)}</select>
+            const next = event.target.value; setBoard(next);
+            const selected = profiles.find(item => item.id === next);
+            if (firmware.current && selected) void loadBytes(firmware.current, selected);
+          }}>{profiles.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
         </div>
         <label className={`file-button${!ready || busy ? ' disabled' : ''}`}>
-          Load firmware<input type="file" accept=".bin" aria-label="Load firmware .bin" disabled={!ready || busy}
+          Load firmware<input type="file" accept=".bin" aria-label="Load firmware .bin" disabled={!ready || busy || !profile}
             onChange={event => { void loadFile(event.target.files?.[0]); event.target.value = ''; }} />
         </label>
         <button className="primary" disabled={!loaded || busy || !!snapshot?.faulted} onClick={() => { setError(''); send({ type: snapshot?.running ? 'pause' : 'resume' }); }}>
@@ -111,12 +134,13 @@ export function App() {
       </header>
 
       <div className="firmware-strip"><span className="filename" title={filename}>{filename}</span><span>Drop a .bin anywhere to load</span></div>
+      {detected && <div className="detection-banner" role="status">{detected}<span>Change Board to override.</span></div>}
       {error && <div className="error" role="alert"><strong>{snapshot?.faulted ? 'CPU fault' : 'Emulator error'}</strong><pre>{error}</pre><span>{snapshot?.faulted ? 'Reset to boot again. Peripheral emulation is incomplete.' : 'Check the firmware and selected chip, then load again.'}</span></div>}
 
       <div className="workspace">
         <section className="device-panel" aria-labelledby="device-heading">
           <div className="section-heading"><h2 id="device-heading">Device</h2><span>{chip.toUpperCase()}</span></div>
-          <figure className="display"><canvas width="320" height="170" aria-label="320 by 170 display, not wired yet" /><figcaption>Display (not wired yet)<span>320 × 170</span></figcaption></figure>
+          <Device profile={profile} frame={frame} parts={parts} enabled={loaded && !busy} input={partInput} />
           <div className="gpio-heading"><h2>GPIO state</h2><span>Output registers</span></div>
           <div className="pin-grid" aria-label="GPIO output state">
             {Array.from({ length: chip === 'esp32c3' ? 22 : 49 }, (_, pin) => {
@@ -129,7 +153,6 @@ export function App() {
             })}
           </div>
           <p className="gpio-note">High / low show driven outputs. Input levels are not sampled.</p>
-          <p className="peripheral-note">Display, buttons and CC1101 radio are not connected in this build.</p>
         </section>
 
         <section className="serial-panel" aria-labelledby="serial-heading">

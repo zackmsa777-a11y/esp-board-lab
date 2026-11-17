@@ -1,0 +1,8 @@
+[workspace]
+members = ["st7789", "bq25896", "bq27220", "ky040", "pushbutton"]
+resolver = "2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

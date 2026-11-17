@@ -1,7 +1,8 @@
 // Platform-independent engine. Scheduling, WASM initialization and I/O belong to
 // the host, so this same code can be exercised by the browser and Node smoke test.
+import type { CosimEmulator, PartHost } from './parts/host';
 export type Chip = 'esp32s3' | 'esp32c3';
-export interface Emulator {
+export interface Emulator extends CosimEmulator {
   load_default_rom(): void;
   load_firmware(bytes: Uint8Array): void;
   run_batch(count: number): string;
@@ -15,6 +16,7 @@ export interface Emulator {
   restart(): void;
   wifi_tx_drain(): unknown;
   free(): void;
+  throttle_delay_ms(now: number): number;
 }
 export type EmulatorConstructor = new (chip: string) => Emulator;
 export interface Snapshot {
@@ -29,6 +31,7 @@ export interface Snapshot {
 }
 
 export class EmulatorLoop {
+  parts?: PartHost;
   private emulator: Emulator | null = null;
   private chip: Chip = 'esp32s3';
   private firmware: Uint8Array | null = null;
@@ -39,6 +42,7 @@ export class EmulatorLoop {
 
   load(chip: Chip, firmware: Uint8Array): void {
     this.pause();
+    this.parts = undefined;
     this.emulator?.free();
     this.emulator = null;
     this.firmware = null;
@@ -65,26 +69,32 @@ export class EmulatorLoop {
   }
   pause(): void { this.active = false; }
   get running(): boolean { return this.active; }
+  get machine(): Emulator { if (!this.emulator) throw new Error('No emulator loaded'); return this.emulator; }
   reset(): void {
     if (!this.firmware) throw new Error('Load a firmware .bin before resetting.');
-    // Recreate the machine so firmware mutations and peripheral state are reset.
-    this.load(this.chip, this.firmware);
+    this.pause();
+    this.machine.restart();
+    this.parts?.service();
+    this.resetRate();
   }
   uartInput(bytes: Uint8Array): void { this.emulator?.uart_input(bytes); }
 
   slice(batchSize = 200_000, budgetMs = 12): string {
     if (!this.active || !this.emulator) return '';
-    if (batchSize < 50_000 || batchSize > 200_000) throw new RangeError('Batch size must be 50,000–200,000.');
+    if (batchSize < 1 || batchSize > 200_000) throw new RangeError('Batch size must be 1–200,000.');
     const started = this.now();
     let output = '';
     try {
       do {
-        output += this.emulator.run_batch(batchSize);
-        this.instructions += batchSize;
-        if (this.emulator.needs_restart()) { this.emulator.restart(); break; }
+        const count = this.parts ? Math.min(batchSize, 5000) : batchSize;
+        output += this.emulator.run_batch(count);
+        this.parts?.service();
+        this.instructions += count;
+        if (this.emulator.needs_restart()) { this.emulator.restart(); this.parts?.service(); break; }
         if (this.emulator.faulted()) { this.pause(); break; }
         // No network relay is connected; avoid accumulating firmware TX frames.
         this.emulator.wifi_tx_drain();
+        if (this.emulator.throttle_delay_ms(this.now()) > 0) break;
       } while (this.active && this.now() - started < budgetMs);
     } catch (error) {
       this.pause();

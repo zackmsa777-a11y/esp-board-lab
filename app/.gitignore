@@ -1,6 +1,8 @@
 node_modules/
 dist/
 public/esp-emu/
+public/parts/
+public/boards/
 src-tauri/target/
 src-tauri/gen/
 .verification/

@@ -1,0 +1,32 @@
+{
+  "id": "tembed-cc1101-plus",
+  "name": "LilyGO T-Embed CC1101 Plus",
+  "chip": "esp32s3",
+  "flash": "16MB",
+  "psram": "8MB",
+  "board": "board.json",
+  "match_hints": [
+    "LilyGO T-Embed",
+    "CC1101"
+  ],
+  "display": {
+    "part": "display",
+    "rotate": 90
+  },
+  "controls": [
+    {
+      "part": "encoder",
+      "kind": "encoder",
+      "label": "Wheel"
+    },
+    {
+      "part": "key",
+      "kind": "button",
+      "label": "Key (GPIO6)"
+    }
+  ],
+  "battery": {
+    "charger": "charger",
+    "gauge": "gauge"
+  }
+}
