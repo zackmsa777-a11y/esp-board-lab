@@ -12,12 +12,6 @@ A Tauri 2 Windows workbench for running ESP32 firmware in the vendored Espressif
 From PowerShell in `app/`:
 
 ```powershell
-# D: cache locations are useful on machines with a small system drive.
-$env:TEMP = 'D:\swarm-tmp'
-$env:TMP = 'D:\swarm-tmp'
-$env:CARGO_HOME = 'D:\cargo-home'
-$env:NPM_CONFIG_CACHE = 'D:\npm-cache'
-New-Item -ItemType Directory -Force $env:TEMP | Out-Null
 npm install
 npm run dev            # Browser UI at http://127.0.0.1:1420
 npm run tauri dev      # Native desktop window

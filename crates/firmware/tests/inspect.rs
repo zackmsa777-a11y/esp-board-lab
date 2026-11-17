@@ -1,7 +1,7 @@
 use ebl_firmware::{inspect, Chip};
 
 #[test]
-#[ignore = "requires the locally downloaded T-Embed firmware"]
+#[ignore = "set EBL_TEMBED_FW to a downloaded T-Embed CC1101 factory .bin"]
 fn local_tembed_factory_firmware() {
     let bytes = std::fs::read(r"D:\esp-board-lab\vendor-dl\fw\tembed_factory.bin").unwrap();
     let info = inspect(&bytes).unwrap();
