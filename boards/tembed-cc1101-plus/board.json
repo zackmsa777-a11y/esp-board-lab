@@ -31,6 +31,18 @@
         "SDA": 8
       }
     },
+    "radio": {
+      "module": "cc1101.wasm",
+      "pins": { "CS": 12, "SCK": 11, "MOSI": 9, "MISO": 10, "GDO0": 3, "GDO2": 38, "SW0": 48, "SW1": 47 }
+    },
+    "nfc": {
+      "module": "pn532.wasm",
+      "pins": { "SCL": 18, "SDA": 8, "IRQ": 17, "RST": 45 },
+      "addr": 36
+    },
+    "leds": { "module": "ws2812.wasm", "pins": { "DIN": 14 } },
+    "ir_tx": { "module": "ir_tx.wasm", "pins": { "LED": 2 } },
+    "ir_rx": { "module": "ir_rx.wasm", "pins": { "OUT": 1 } },
     "gauge": {
       "module": "bq27220.wasm",
       "pins": {

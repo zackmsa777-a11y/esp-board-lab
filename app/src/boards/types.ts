@@ -22,6 +22,10 @@ export interface Profile {
   display?: { part: string; rotate: number };
   controls?: { part: string; kind: 'encoder' | 'button'; label: string }[];
   battery?: { charger: string; gauge: string };
+  radio?: { part: string };
+  nfc?: { part: string };
+  leds?: { part: string; count: number; layout: 'ring-around-knob'; radius_mm?: number; placement_note?: string; source_page?: string };
+  ir?: { tx: string; rx: string };
   model3d?: Model3D;
 }
 export interface PartDefinition {

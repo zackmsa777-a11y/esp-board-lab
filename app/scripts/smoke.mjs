@@ -6,6 +6,7 @@ import { deflateSync } from 'node:zlib';
 import { EmulatorLoop } from '../src/emu/loop.ts';
 import { PartHost } from '../src/emu/parts/host.ts';
 import pb from '../../vendor/esp-emu-wasm/vendor/esp_cosim_pb.js';
+import { runScenario } from './scenarios.mjs';
 
 const vendor = new URL('../../vendor/esp-emu-wasm/pkg/', import.meta.url);
 const wasm = await import(new URL('esp_emu.js', vendor));
@@ -49,8 +50,31 @@ try {
   loop.resume();
   let output = '', nextLog = 5000, controlStage = 0;
   const start = performance.now();
+  const scenario = process.env.SCENARIO;
+  const screenshot = async destination => {
+    const frame = host.framebuffer(profile.display.part, false);
+    if (frame) { await mkdir(dirname(destination), { recursive: true }); await writeFile(destination, png(frame, profile.display.rotate)); }
+  };
+  const pump = async (duration, until = () => false) => {
+    const began = performance.now();
+    while (performance.now() - began < duration && loop.running && !until()) {
+      output += loop.slice();
+      const delay = Math.min(20, loop.machine.throttle_delay_ms(performance.now()));
+      if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
+    }
+    assert.equal(loop.snapshot().faulted, false, loop.snapshot().fault_report ?? 'CPU fault');
+  };
+  if (scenario) {
+    try { await runScenario({ scenario, host, loop, pump, screenshot, getOutput: () => output }); }
+    catch (error) {
+      const directory = process.env.SMOKE_ARTIFACTS ?? `D:/swarm-tmp/w12-smoke-${scenario}`;
+      await screenshot(`${directory}/failure.png`);
+      await writeFile(`${directory}/failure.json`, JSON.stringify({ error: String(error), states: host.states(), uart: output, snapshot: loop.snapshot() }, null, 2));
+      throw error;
+    }
+  }
   const duration = Number(process.env.SMOKE_MS ?? 20_000);
-  while (performance.now() - start < duration && loop.running) {
+  while (!scenario && performance.now() - start < duration && loop.running) {
     output += loop.slice();
     const elapsed = performance.now() - start;
     if (elapsed >= nextLog) { console.log(`[smoke] wall=${Math.round(elapsed)}ms traffic=${JSON.stringify(host.traffic)} display=${JSON.stringify(host.states().find(part => part.name === 'display'))}`); nextLog += 5000; }

@@ -40,6 +40,35 @@ h2 { margin: 0; font-size: 14px; font-weight: 600; }
 .section-heading > span, .serial-actions > span { color: var(--muted); font-size: 11px; }
 .display { margin: 0; }
 .device-bezel { background: #090d12; border: 1px solid #45556b; padding: 14px; border-radius: 16px; }
+.device-bezel.has-leds { display: grid; grid-template-columns: minmax(0, 1fr) 80px; align-items: center; gap: 10px; }
+.led-ring-2d { width: 80px; height: 80px; position: relative; display: grid; place-items: center; }
+.led-dots { position: absolute; inset: 0; pointer-events: none; }
+.led-dot { position: absolute; width: 8px; height: 8px; left: var(--led-x); top: var(--led-y); transform: translate(-50%, -50%); border-radius: 50%; background: var(--led-color); border: 1px solid #a4b2c4; }
+.led-dot.led-off { border-color: #45556b; background: #202a37; }
+.ring-knob { width: 53px; height: 53px; min-height: 0; padding: 0; border-radius: 50%; border: 2px solid #65717c; font-size: 10px; background: #303943; }
+.peripheral-panels { margin-top: 26px; border-top: 1px solid var(--line); }
+.peripheral-panel { border-bottom: 1px solid var(--line); }
+.peripheral-panel > summary { padding: 13px 0; cursor: pointer; font-weight: 600; font-size: 14px; }
+.peripheral-panel > summary::marker { color: var(--accent); }
+.peripheral-panel > summary > span { float: right; max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 400; color: var(--muted); padding-top: 2px; }
+.peripheral-panel > summary:hover { color: #b3d5fa; }
+.peripheral-body { padding: 0 0 16px; }
+.peripheral-readout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; margin: 2px 0 16px; font-size: 12px; }
+.peripheral-readout div { min-width: 0; }
+.peripheral-readout dt { color: var(--muted); font-size: 11px; margin-bottom: 3px; }
+.peripheral-readout dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.peripheral-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.peripheral-actions button, .peripheral-actions .file-button { padding: 5px 10px; font-size: 12px; min-height: 32px; }
+.peripheral-body h3 { font-size: 12px; font-weight: 600; margin: 22px 0 8px; }
+.peripheral-empty { font-size: 12px; color: var(--muted); line-height: 1.6; margin: 0; }
+.peripheral-notice { font-size: 12px; color: #b6eef3; line-height: 1.5; margin: 12px 0 0; overflow-wrap: anywhere; }
+.peripheral-toggle { display: flex; align-items: center; gap: 7px; min-height: 36px; font-size: 12px; margin-top: 10px; }
+.peripheral-toggle input { accent-color: var(--accent); width: 18px; height: 18px; }
+.signal-label { display: block; font-size: 12px; color: var(--muted); margin: 14px 0 6px; }
+.peripheral-body select { max-width: 100%; font-size: 12px; }
+.capture-list { padding: 0; margin: 0; list-style: none; max-height: 300px; overflow: auto; }
+.capture-list > li { padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.capture-list > li > small { display: block; color: var(--muted); font-size: 11px; margin-top: 4px; overflow-wrap: anywhere; }
 .screen-button { display: block; width: 100%; padding: 0; border: 0; border-radius: 0; background: #000; }
 .screen-button:disabled { opacity: 1; }
 .screen-button canvas { display: block; width: 100%; height: auto; image-rendering: pixelated; background: #000; }

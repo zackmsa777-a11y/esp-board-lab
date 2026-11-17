@@ -9,9 +9,10 @@ class SceneBoundary extends Component<{ children: ReactNode }, { error: boolean 
   static getDerivedStateFromError() { return { error: true }; }
   render() { return this.state.error ? <p className="model-error" role="alert">3D rendering is unavailable. Switch to 2D to keep using the device.</p> : this.props.children; }
 }
-export default function ModelView({ model, frame, rotation, displayOn, enabled, turn, press, release }: {
+export default function ModelView({ model, frame, rotation, displayOn, enabled, turn, press, release, ledColors, ledRadius }: {
   model: Model3D; frame: DisplayFrame | null; rotation: number; displayOn: boolean; enabled: boolean;
   turn: (steps: number) => void; press: (control: 'knob' | 'key') => void; release: (control: 'knob' | 'key') => void;
+  ledColors: string[]; ledRadius?: number;
 }) {
   const [source, setSource] = useState(() => preference('model-source', 'builtin'));
   const [meshes, setMeshes] = useState<ModelMesh[]>();
@@ -64,7 +65,7 @@ export default function ModelView({ model, frame, rotation, displayOn, enabled, 
     {error && <p className="model-error" role="alert">{error}</p>}
     {notice && <p className="gpio-note">{notice}</p>}
     <SceneBoundary><Suspense fallback={<p className="gpio-note">Loading 3D viewer…</p>}>
-      <DeviceScene model={model} meshes={source === 'official' ? meshes : undefined} frame={frame} rotation={rotation} displayOn={displayOn} enabled={enabled} turn={turn} press={press} release={release} reset={reset} />
+      <DeviceScene model={model} meshes={source === 'official' ? meshes : undefined} frame={frame} rotation={rotation} displayOn={displayOn} enabled={enabled} turn={turn} press={press} release={release} reset={reset} ledColors={ledColors} ledRadius={ledRadius} />
     </Suspense></SceneBoundary>
     <p className="model-hint">Drag to rotate · Scroll to zoom · Right-drag to pan · Double-click to reset<br />Drag the knob to turn · Scroll over knob for detents · Click and hold to press</p>
     <p className="gpio-note">GPIO6 key: side button near the knob (approximate placement). Keyboard: ← → turn · Enter press · K key.</p>

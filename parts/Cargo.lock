@@ -50,6 +50,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "cc1101"
+version = "0.1.0"
+dependencies = [
+ "esp-part",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -139,6 +146,20 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "ir_rx"
+version = "0.1.0"
+dependencies = [
+ "esp-part",
+]
+
+[[package]]
+name = "ir_tx"
+version = "0.1.0"
+dependencies = [
+ "esp-part",
 ]
 
 [[package]]
@@ -296,6 +317,13 @@ dependencies = [
  "fixedbitset",
  "hashbrown 0.15.5",
  "indexmap",
+]
+
+[[package]]
+name = "pn532"
+version = "0.1.0"
+dependencies = [
+ "esp-part",
 ]
 
 [[package]]
@@ -566,4 +594,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "ws2812"
+version = "0.1.0"
+dependencies = [
+ "esp-part",
 ]

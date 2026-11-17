@@ -6,13 +6,28 @@ import type { OrbitControls as Controls } from 'three-stdlib';
 import type { Model3D } from '../boards/types';
 import type { DisplayFrame } from '../emu/parts/host';
 import type { ModelMesh } from './model';
+import { ledDisplayColor } from '../LedRing';
 
 type Props = {
   model: Model3D; meshes?: ModelMesh[]; frame: DisplayFrame | null; rotation: number;
   displayOn: boolean; enabled: boolean; reset: number;
+  ledColors: string[]; ledRadius?: number;
   turn: (steps: number) => void; press: (control: 'knob' | 'key') => void; release: (control: 'knob' | 'key') => void;
 };
 const radians = Math.PI / 180;
+function LedRing({ model, ledColors, ledRadius = 14.6 }: Pick<Props, 'model' | 'ledColors' | 'ledRadius'>) {
+  const invalidate = useThree(s => s.invalidate);
+  const signature = ledColors.join(',');
+  useEffect(() => { invalidate(); }, [signature, invalidate]);
+  const [x, y] = model.knob.center;
+  return <group name="ws2812-ring">{ledColors.map((color, i) => {
+    const angle = i / ledColors.length * Math.PI * 2 - Math.PI / 2;
+    const light = ledDisplayColor(color);
+    return <mesh key={i} name={`ws2812-${i + 1}`} position={[x + Math.cos(angle) * ledRadius, y + Math.sin(angle) * ledRadius, -2.9]}>
+      <sphereGeometry args={[.85, 12, 8]} /><meshStandardMaterial color={color === '#000000' ? '#35404a' : light} emissive={light} emissiveIntensity={2.2} toneMapped={false} roughness={.25} />
+    </mesh>;
+  })}</group>;
+}
 function outline(width: number, height: number, radius: number, x = 0, y = 0) {
   const s = new Shape(); const l = x - width / 2, b = y - height / 2;
   s.moveTo(l + radius, b); s.lineTo(l + width - radius, b);
@@ -186,7 +201,7 @@ function Stage(props: Props & { orbitBlocked: boolean; blockOrbit: (value: boole
     </Environment>
     <group rotation={[Math.PI, 0, 0]}>
       {props.meshes ? <OfficialShell meshes={props.meshes} /> : <BuiltinShell model={props.model} />}
-      <LiveScreen {...props} /><Interactives {...props} />
+      <LiveScreen {...props} /><LedRing {...props} /><Interactives {...props} />
     </group>
     <ContactShadows position={[0, -26, 0]} opacity={.45} scale={210} blur={2.5} far={80} resolution={256} frames={1} />
     <OrbitControls ref={controls} makeDefault enabled={!props.orbitBlocked} enableDamping dampingFactor={.12} minDistance={75} maxDistance={320} target={[0, 0, -8]} />

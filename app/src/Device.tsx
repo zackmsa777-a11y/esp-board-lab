@@ -1,11 +1,14 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import type { Profile } from './boards/types';
 import type { DisplayFrame, PartSnapshot } from './emu/parts/host';
+import { PeripheralPanels, type ReadExport, type PartInput } from './PeripheralPanels';
+import { LedRing, ledColors } from './LedRing';
 const ModelView = lazy(() => import('./three/ModelView'));
 
-export function Device({ profile, frame, parts, enabled, input, mode = '2d' }: {
+export function Device({ profile, frame, parts, enabled, input, readExport, inputAsync, mode = '2d' }: {
   profile?: Profile; frame: DisplayFrame | null; parts: PartSnapshot[]; enabled: boolean;
   input: (part: string, kind: string) => void;
+  readExport: ReadExport; inputAsync: PartInput;
   mode?: '2d' | '3d';
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -62,7 +65,7 @@ export function Device({ profile, frame, parts, enabled, input, mode = '2d' }: {
     const held = new Map<string, string>();
     const down = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
-      if (target.closest('input, select, textarea, .terminal-host, [contenteditable]')) return;
+      if (target.closest('input, select, textarea, summary, .peripheral-panels, .terminal-host, [contenteditable]')) return;
       if (event.key === 'Enter' && target.closest('button')) return;
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
         if (wheel) { event.preventDefault(); queue.current.push(event.key === 'ArrowRight' ? 'cw' : 'ccw'); } return;
@@ -96,13 +99,15 @@ export function Device({ profile, frame, parts, enabled, input, mode = '2d' }: {
   useEffect(() => { setCharging(truth(chargingValue)); }, [chargingValue]);
   const display = parts.find(part => part.name === profile?.display?.part)?.values;
   const displayOn = !display || (display.on !== 'false' && display.on !== '0' && display.backlight !== 'false' && display.backlight !== '0' && display.sleeping !== 'true' && display.sleeping !== '1');
+  const colors = ledColors(profile, parts);
   return <>
     {mode === '3d' && profile?.model3d ? <Suspense fallback={<p className="gpio-note">Loading 3D viewer…</p>}>
-      <ModelView model={profile.model3d} frame={frame} rotation={rotation} displayOn={displayOn} enabled={enabled} turn={turn} press={press} release={release} />
-    </Suspense> : <div className="device-bezel" ref={device}>
+      <ModelView model={profile.model3d} frame={frame} rotation={rotation} displayOn={displayOn} enabled={enabled} turn={turn} press={press} release={release} ledColors={colors} ledRadius={profile.leds?.radius_mm} />
+    </Suspense> : <div className={`device-bezel${colors.length ? ' has-leds' : ''}`} ref={device}>
       <button className="screen-button" disabled={!enabled || !wheel} aria-label="Press encoder; scroll to turn the wheel" {...(wheel ? hold(wheel.part) : {})}>
         <canvas ref={canvas} width="320" height="170" aria-label="Live firmware display" />
       </button>
+      {!!colors.length && <LedRing colors={colors}><button className="ring-knob" aria-label="Press encoder knob" disabled={!enabled || !wheel} {...(wheel ? hold(wheel.part) : {})}>Wheel</button></LedRing>}
     </div>}
       <div className="device-controls">
         {wheel && <><button disabled={!enabled} onClick={() => queue.current.push('ccw')} aria-label="Turn wheel counterclockwise">Left</button><button disabled={!enabled} {...hold(wheel.part)}>Wheel</button><button disabled={!enabled} onClick={() => queue.current.push('cw')} aria-label="Turn wheel clockwise">Right</button></>}
@@ -116,10 +121,11 @@ export function Device({ profile, frame, parts, enabled, input, mode = '2d' }: {
       <div className="battery-switches"><label htmlFor="battery-usb"><input id="battery-usb" type="checkbox" disabled={!enabled} checked={usb} onChange={event => { setUsb(event.target.checked); batteryInput(`set:usb=${Number(event.target.checked)}`); }} />USB connected</label>
       <label htmlFor="battery-charging"><input id="battery-charging" type="checkbox" disabled={!enabled} checked={charging} onChange={event => { setCharging(event.target.checked); batteryInput(`set:charging=${Number(event.target.checked)}`); }} />Charging</label></div>
     </section>}
+    <PeripheralPanels profile={profile} parts={parts} enabled={enabled} input={inputAsync} readExport={readExport} />
     <section className="parts-panel"><div className="gpio-heading"><h2>Attached parts</h2><span>{parts.length}</span></div>
       {!parts.length && <p className="gpio-note">No parts attached.</p>}
       <ul className="parts-list">{parts.map(part => <li key={part.name}><div><strong>{part.name}</strong><span>{part.error ? 'Attach error' : part.ready ? 'Attached' : 'Registering'}</span></div>
-        {part.error ? <p className="part-error">{part.error}</p> : <dl>{Object.entries(part.values).map(([name, value]) => <div key={name}><dt>{name}</dt><dd>{value}</dd></div>)}</dl>}
+        {part.error ? <p className="part-error">{part.error}</p> : <dl>{Object.entries(part.values).map(([name, value]) => <div key={name}><dt>{name}</dt><dd>{value.length > 160 ? `${value.slice(0, 160)}…` : value}</dd></div>)}</dl>}
       </li>)}</ul>
     </section>
   </>;

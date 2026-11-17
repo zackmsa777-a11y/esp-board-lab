@@ -86,8 +86,19 @@ host.onmessage = ({ data }) => {
         clearTimeout(timer); timer = undefined; loop.reset(); status(); break;
       case 'uart_input': loop.uartInput(data.data); break;
       case 'part_input':
-        loop.parts?.input(data.part, data.input);
+        try {
+          if (!loop.parts) throw new Error('Load firmware before sending part inputs.');
+          loop.parts.input(data.part, data.input);
+          send({ type: 'input-result', requestId: data.requestId });
+        } catch (error) { send({ type: 'input-result', requestId: data.requestId, error: error instanceof Error ? error.message : String(error) }); }
         if (loop.parts) send({ type: 'parts', parts: loop.parts.states(), traffic: loop.parts.traffic });
+        break;
+      case 'read-export':
+        try {
+          if (!loop.parts) throw new Error('Load firmware before reading part exports.');
+          const value = loop.parts.readExport(data.request);
+          host.postMessage({ type: 'export-result', requestId: data.requestId, value }, value instanceof ArrayBuffer ? [value] : []);
+        } catch (error) { send({ type: 'export-result', requestId: data.requestId, error: error instanceof Error ? error.message : String(error) }); }
         break;
     }
   }).catch(report);

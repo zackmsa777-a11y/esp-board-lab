@@ -5,7 +5,7 @@ import type { Snapshot } from './emu/loop';
 import type { WorkerCommand, WorkerEvent } from './emu/protocol';
 import { loadBoard, loadProfiles } from './boards';
 import type { Profile } from './boards/types';
-import type { DisplayFrame, PartSnapshot } from './emu/parts/host';
+import type { DisplayFrame, ExportRead, ExportValue, PartSnapshot } from './emu/parts/host';
 import { detectBoard } from './detect';
 import { Device } from './Device';
 import { preference, savePreference } from './three/model';
@@ -35,10 +35,24 @@ export function App() {
   const terminalHost = useRef<HTMLDivElement>(null);
   const firmware = useRef<ArrayBuffer | null>(null);
   const loadSequence = useRef(0);
+  const requestSequence = useRef(0);
+  const requests = useRef(new Map<number, { resolve: (value?: ExportValue) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>());
   const send = useCallback((message: WorkerCommand, transfer: Transferable[] = []) => {
     worker.current?.postMessage(message, transfer);
   }, []);
   const partInput = useCallback((part: string, input: string) => send({ type: 'part_input', part, input }), [send]);
+  const requestPart = useCallback((command: { type: 'read-export'; request: ExportRead } | { type: 'part_input'; part: string; input: string }) => new Promise<ExportValue | undefined>((resolve, reject) => {
+    const requestId = ++requestSequence.current;
+    const timer = setTimeout(() => { requests.current.delete(requestId); reject(new Error('The part did not respond. Try again after the emulator finishes loading.')); }, 15_000);
+    requests.current.set(requestId, { resolve, reject, timer });
+    send({ ...command, requestId });
+  }), [send]);
+  const readExport = useCallback(async (request: ExportRead) => {
+    const value = await requestPart({ type: 'read-export', request });
+    if (value === undefined) throw new Error('The part returned no export value.');
+    return value;
+  }, [requestPart]);
+  const inputAsync = useCallback(async (part: string, input: string) => { await requestPart({ type: 'part_input', part, input }); }, [requestPart]);
   useEffect(() => {
     let alive = true;
     void loadProfiles().then(items => { if (alive) { setProfiles(items); setBoard(items.find(item => item.display)?.id ?? items[0]?.id ?? ''); } }).catch(cause => { if (alive) setError(`Could not load board profiles: ${String(cause)}`); });
@@ -67,6 +81,16 @@ export function App() {
         case 'loaded': setLoaded(true); setBusy(false); setError(''); break;
         case 'parts': setParts(data.parts); break;
         case 'frame': setFrame(data.frame); break;
+        case 'export-result':
+        case 'input-result': {
+          const pending = data.requestId === undefined ? undefined : requests.current.get(data.requestId);
+          if (pending) {
+            clearTimeout(pending.timer); requests.current.delete(data.requestId!);
+            if (data.error) pending.reject(new Error(data.error));
+            else pending.resolve(data.type === 'export-result' ? data.value : undefined);
+          }
+          break;
+        }
         case 'uart': term.write(data.text); break;
         case 'status':
           setSnapshot(data.status);
@@ -77,6 +101,8 @@ export function App() {
     };
     emuWorker.onerror = event => { setError(event.message || 'The emulator worker stopped. Reload the app.'); setBusy(false); };
     return () => {
+      for (const pending of requests.current.values()) { clearTimeout(pending.timer); pending.reject(new Error('Emulator closed.')); }
+      requests.current.clear();
       worker.current = null; terminal.current = null;
       emuWorker.terminate(); resize.disconnect(); input.dispose(); term.dispose();
     };
@@ -152,7 +178,7 @@ export function App() {
             {profile?.model3d && <><div className="view-toggle" role="group" aria-label="Device view">{(['2d', '3d'] as const).map(mode => <button key={mode} aria-pressed={deviceMode === mode} onClick={() => { setDeviceMode(mode); savePreference('device-mode', mode); }}>{mode.toUpperCase()}</button>)}</div>
             {mode3d && <button aria-pressed={focus} onClick={() => setFocus(value => !value)}>{focus ? 'Exit focus (Esc)' : 'Focus'}</button>}</>}
             <span>{chip.toUpperCase()}</span></div></div>
-          <Device profile={profile} frame={frame} parts={parts} enabled={loaded && !busy} input={partInput} mode={mode3d ? '3d' : '2d'} />
+          <Device profile={profile} frame={frame} parts={parts} enabled={loaded && !busy} input={partInput} readExport={readExport} inputAsync={inputAsync} mode={mode3d ? '3d' : '2d'} />
           <div className="gpio-heading"><h2>GPIO state</h2><span>Output registers</span></div>
           <div className="pin-grid" aria-label="GPIO output state">
             {Array.from({ length: chip === 'esp32c3' ? 22 : 49 }, (_, pin) => {

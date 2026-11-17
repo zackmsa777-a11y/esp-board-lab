@@ -39,6 +39,16 @@ export interface PartSnapshot {
   values: Record<string, string>; error?: string;
 }
 export interface DisplayFrame { part: string; width: number; height: number; seq: number; rgba: ArrayBuffer }
+export interface ExportRead {
+  part: string;
+  name: string;
+  args?: number[];
+  /** Read bytes at the returned pointer; otherwise return the scalar value. */
+  lengthExport?: string;
+  lengthArgs?: number[];
+  byteLength?: number;
+}
+export type ExportValue = number | ArrayBuffer;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const big = (value: unknown): bigint => value == null ? 0n : BigInt(String(value));
@@ -91,11 +101,14 @@ export class PartHost {
     return new Uint8Array(e.memory.buffer, pointer, len).slice();
   }
   private send(part: Part, bytes: Uint8Array): void { this.emu.cosim_push_inbound(part.name, bytes); }
-  // Once per ABI event, not a while-until-empty loop: poll may emit a future
-  // event and expects subsequent polls to receive advancing emulated time.
+  // Parts may stage a bounded lookahead of future edges at the current time.
+  // Drain that batch, but cap work so a faulty part cannot starve the CPU worker.
   private poll(part: Part): void {
-    const bytes = this.take(part, part.exports!.part_poll(part.now));
-    if (bytes) this.send(part, bytes);
+    for (let i = 0; i < 64; i++) {
+      const bytes = this.take(part, part.exports!.part_poll(part.now));
+      if (!bytes) break;
+      this.send(part, bytes);
+    }
   }
   private message(part: Part, payload: Uint8Array): void {
     if (!part.exports!.part_on_message) throw new Error('part cannot handle one-way message');
@@ -166,9 +179,39 @@ export class PartHost {
   }
   input(name: string, input: string): void {
     const part = this.parts.get(name);
-    if (!part?.exports) return;
-    this.guard(part, () => { const bytes = encoder.encode(input); this.give(part, bytes); part.exports!.part_on_input(bytes.length); if (part.ready) this.poll(part); });
+    if (!part?.exports || !part.ready || part.error) throw new Error(`${name}: ${part?.error ?? 'part is not attached'}`);
+    const bytes = encoder.encode(input);
+    // A rejected upload is recoverable; never disable an otherwise healthy part.
+    if (bytes.length > part.exports.part_buffer_len()) throw new Error(`File input is ${bytes.length} bytes; ${name} accepts up to ${part.exports.part_buffer_len()} UTF-8 bytes including the input prefix.`);
+    this.guard(part, () => { this.give(part, bytes); part.exports!.part_on_input(bytes.length); if (part.ready) this.poll(part); });
     this.service();
+    if (part.error) throw new Error(`${name}: ${part.error}`);
+  }
+  readExport(request: ExportRead): ExportValue {
+    const part = this.parts.get(request.part);
+    if (!part?.exports || !part.ready || part.error) throw new Error(`${request.part}: ${part?.error ?? 'part is not attached'}`);
+    const e = part.exports;
+    const call = (name: string, args: number[] = []) => {
+      if (!/^ebl_[a-z0-9_]+$/.test(name)) throw new Error('Only ebl_* extra exports may be read');
+      if (args.length > 4 || args.some(arg => !Number.isSafeInteger(arg) || arg < 0 || arg > 0xffffffff)) throw new Error('Invalid export arguments');
+      const fn = (e as unknown as Record<string, unknown>)[name];
+      if (typeof fn !== 'function') throw new Error(`${request.part} does not export ${name}`);
+      const result: unknown = fn(...args);
+      if (typeof result !== 'number' || !Number.isSafeInteger(result) || result < 0) throw new Error(`Invalid result from ${name}`);
+      return result;
+    };
+    const result = call(request.name, request.args);
+    if (!request.lengthExport && request.byteLength === undefined) return result;
+    const length = request.lengthExport ? call(request.lengthExport, request.lengthArgs ?? request.args) : request.byteLength!;
+    if (!Number.isSafeInteger(length) || length < 0 || length > 16 * 1024 * 1024 || result + length > e.memory.buffer.byteLength) throw new Error('Exported bytes are outside part memory or exceed 16 MiB');
+    // Copy before another call can grow or mutate WASM memory.
+    return new Uint8Array(e.memory.buffer, result, length).slice().buffer;
+  }
+  /** Last emulated event time, for deterministic input timing in smoke tools. */
+  timeNs(name: string): bigint {
+    const part = this.parts.get(name);
+    if (!part) throw new Error(`Unknown part ${name}`);
+    return part.now;
   }
   states(): PartSnapshot[] {
     return [...this.parts.values()].map(part => {

@@ -1,5 +1,5 @@
 [workspace]
-members = ["st7789", "bq25896", "bq27220", "ky040", "pushbutton"]
+members = ["st7789", "bq25896", "bq27220", "ky040", "pushbutton", "cc1101", "pn532", "ws2812", "ir_tx", "ir_rx"]
 resolver = "2"
 
 [profile.release]

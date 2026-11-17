@@ -29,6 +29,17 @@
     "charger": "charger",
     "gauge": "gauge"
   },
+  "radio": { "part": "radio" },
+  "nfc": { "part": "nfc" },
+  "leds": {
+    "part": "leds",
+    "count": 8,
+    "layout": "ring-around-knob",
+    "radius_mm": 14.6,
+    "placement_note": "Eight LEDs shown around the encoder to the right of the screen, following LilyGO docs/nfc_test.jpg and the README WS2812 wiring. Angular spacing and 14.6 mm radius are illustrative; GPIO14 and count 8 follow the LilyGO README.",
+    "source_page": "https://github.com/Xinyuan-LilyGO/T-Embed-CC1101/blob/master/docs/nfc_test.jpg"
+  },
+  "ir": { "tx": "ir_tx", "rx": "ir_rx" },
   "model3d": {
     "official": {
       "url": "https://raw.githubusercontent.com/Xinyuan-LilyGO/T-Embed-CC1101/cf0f864fff39cb6152e4d4f5664300afd504d354/3D_files/T-Embed%20CC1101.stp",
