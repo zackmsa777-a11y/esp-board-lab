@@ -1,0 +1,172 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Virtual potentiometer — esp-emu</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px ui-monospace, Menlo, monospace; margin: 0; padding: 24px;
+         background: #12121a; color: #e6e4de; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: #8d8a96; margin: 0 0 18px; max-width: 62ch; line-height: 1.5; }
+  .row { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  button { font: inherit; background: #24232c; color: inherit; border: 1px solid #3a3844;
+           border-radius: 4px; padding: 8px 16px; cursor: pointer; }
+  button:hover:not(:disabled) { background: #2f2e39; }
+  button:disabled { opacity: .45; cursor: default; }
+  #log { background: #0d0d13; border: 1px solid #2a2932; border-radius: 5px;
+         padding: 12px; height: 46vh; overflow: auto; white-space: pre-wrap; font-size: 12.5px; }
+  .ok { color: #6fd08c; } .warn { color: #e0b062; } .dim { color: #75727e; }
+  .reading { display: inline-block; min-width: 20ch; }
+  #pick { display: none; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+  #pick label { display: flex; gap: 10px; align-items: center; }
+</style>
+
+<h1>A potentiometer, a chip, and nothing else</h1>
+<p class="sub">Two WebAssembly modules in one tab. The emulator runs real ESP32-C3
+firmware that reads GPIO 3 with the stock <code>adc_oneshot</code> driver.
+<code>potentiometer.wasm</code>, built from <code>examples/parts/potentiometer</code>,
+holds its wiper's voltage on that pad. Turn the knob and the next reading
+follows.</p>
+
+<div id="pick">
+  <span class="dim">Pick the two files this page runs. The firmware is
+  <code>test_apps/adc_oneshot</code> built for esp32c3 (its merged flash image).
+  The part is <code>potentiometer.wasm</code>, built from <code>examples/parts/potentiometer</code>.</span>
+  <label>Firmware (.bin) <input type="file" id="fw-file" accept=".bin"></label>
+  <label>Part (.wasm) <input type="file" id="part-file" accept=".wasm"></label>
+  <div><button id="start" disabled>Start</button></div>
+</div>
+<div class="row">
+  <button data-input="more" disabled>Turn up</button>
+  <button data-input="less" disabled>Turn down</button>
+  <span class="reading dim" id="reading">no reading yet</span>
+  <span class="dim" id="status">loading…</span>
+</div>
+<div id="log"></div>
+
+<script type="module">
+import init, { WasmEmulator } from "./pkg/esp_emu.js";
+import { CosimPump } from "./cosim.js";
+
+const log = document.getElementById("log");
+const put = (s, cls = "") => {
+  const d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.textContent = s;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+};
+
+// Playwright reads these rather than scraping the log, so a test asserts on
+// what happened rather than on how it was worded.
+const state = { ready: false, uart: "", readings: [], events: [], error: null };
+window.__demo = state;
+
+const inputBtns = [...document.querySelectorAll("button[data-input]")];
+const statusEl = document.getElementById("status");
+const readingEl = document.getElementById("reading");
+
+function fail(text) {
+  state.error = text;
+  statusEl.textContent = "failed";
+  put(text, "warn");
+}
+
+/** The bytes at `url`, or null when the server does not have it. */
+async function fetchBytes(url) {
+  const res = await fetch(url, { cache: "reload" });
+  return res.ok ? await res.arrayBuffer() : null;
+}
+
+/**
+ * The firmware and the part, as bytes. Served next to this page when they are
+ * there (a release's www/ and Pages carry them; in a checkout someone put them
+ * there). Otherwise picked by the person.
+ */
+async function inputs() {
+  const fw = await fetchBytes("./_adc_fw.bin");
+  const part = await fetchBytes("./potentiometer.wasm");
+  if (fw && part) return { fw, part };
+
+  const pick = document.getElementById("pick");
+  const fwFile = document.getElementById("fw-file");
+  const partFile = document.getElementById("part-file");
+  const start = document.getElementById("start");
+  pick.style.display = "flex";
+  statusEl.textContent = "waiting for files";
+  const ready = () => { start.disabled = !(fwFile.files.length && partFile.files.length); };
+  fwFile.onchange = ready;
+  partFile.onchange = ready;
+  await new Promise((r) => { start.onclick = r; });
+  pick.style.display = "none";
+  statusEl.textContent = "loading…";
+  return { fw: await fwFile.files[0].arrayBuffer(), part: await partFile.files[0].arrayBuffer() };
+}
+
+try {
+  await init();
+  const files = await inputs();
+
+  // The part runs in its own worker, loaded by the generic host. Nothing in
+  // this page knows what a sensor is.
+  const worker = new Worker("./part-worker.js", { type: "module" });
+  const chan = new MessageChannel();
+
+  worker.onmessage = (ev) => {
+    const m = ev.data;
+    if (m.type === "loaded") put(`part loaded: ${m.name}`, "dim");
+    else if (m.type === "ready") {
+      put(`part attached to ${m.chip}`, "ok");
+      state.ready = true;
+      for (const b of inputBtns) b.disabled = false;
+      statusEl.textContent = "running";
+    } else if (m.type === "error") fail(`part: ${m.text}`);
+  };
+
+  const emu = new WasmEmulator("esp32c3");
+  emu.load_default_rom();
+  emu.load_firmware(new Uint8Array(files.fw));
+
+  // With the worker, so a part that never answers is stopped, not left spinning.
+  const pump = new CosimPump(emu, { port: chan.port1, worker });
+  // The pad the board wires the wiper to, as examples/boards/analog does:
+  // GPIO 3, ADC1 channel 3 on the C3.
+  worker.postMessage(
+    { type: "start", port: chan.port2, module: files.part,
+      config: { pins: { W: 3 } } },
+    [chan.port2, files.part],
+  );
+
+  // Let the part claim its pad before the firmware's first conversion.
+  if (!(await pump.waitForDevice(5000))) {
+    fail("no part attached within 5 s");
+  } else {
+    put("emulator + part attached, running firmware", "dim");
+  }
+
+  // An input turns the knob. The firmware sees it in its next reading, a
+  // second later in emulated time.
+  for (const b of inputBtns) {
+    b.onclick = () => {
+      worker.postMessage({ type: "input", kind: b.dataset.input });
+      state.events.push(b.dataset.input);
+    };
+  }
+
+  pump.start((out) => {
+    state.uart += out;
+    for (const line of out.split("\n")) {
+      if (!line.trim()) continue;
+      const m = line.match(/ADC: (?:read=\d+ )?raw=(\d+) mv=(-?\d+|-)/);
+      if (m) {
+        const mv = m[2] === "-" ? null : Number(m[2]);
+        state.readings.push({ raw: Number(m[1]), mv });
+        readingEl.textContent = mv === null ? `raw ${m[1]}` : `${mv} mV`;
+        readingEl.className = "reading ok";
+      }
+      put(line, /ADC/.test(line) ? "ok" : "");
+    }
+  }, (e) => fail(String(e && e.message || e)));
+} catch (e) {
+  fail(String(e && e.message || e));
+}
+</script>

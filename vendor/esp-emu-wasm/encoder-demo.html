@@ -1,0 +1,176 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Virtual encoder — esp-emu</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font: 14px ui-monospace, Menlo, monospace; margin: 0; padding: 24px;
+         background: #12121a; color: #e6e4de; }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: #8d8a96; margin: 0 0 18px; max-width: 62ch; line-height: 1.5; }
+  .row { display: flex; gap: 10px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  button { font: inherit; background: #24232c; color: inherit; border: 1px solid #3a3844;
+           border-radius: 4px; padding: 8px 16px; cursor: pointer; }
+  button:hover:not(:disabled) { background: #2f2e39; }
+  button:disabled { opacity: .45; cursor: default; }
+  .knob { border-color: #4a4756; padding: 14px 22px; }
+  #count { display: inline-block; min-width: 11ch; }
+  #log { background: #0d0d13; border: 1px solid #2a2932; border-radius: 5px;
+         padding: 12px; height: 46vh; overflow: auto; white-space: pre-wrap; font-size: 12.5px; }
+  .ok { color: #6fd08c; } .warn { color: #e0b062; } .dim { color: #75727e; }
+  #pick { display: none; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+  #pick label { display: flex; gap: 10px; align-items: center; }
+</style>
+
+<h1>A rotary encoder, counted by the chip</h1>
+<p class="sub">Two WebAssembly modules in one tab. The emulator runs real ESP32-C6
+firmware; <code>ky040.wasm</code> — built from <code>examples/parts/ky040</code> — models a
+KY-040 knob on GPIO 5, 6 and 7. Turn it and the chip's pulse counter counts
+four a detent, through the stock <code>esp_driver_pcnt</code>.</p>
+
+<div id="pick">
+  <span class="dim">Pick the two files this page runs. The firmware is
+  <code>test_apps/pcnt_encoder</code> built for esp32c6 (its merged flash image);
+  the part is <code>ky040.wasm</code>, built from <code>examples/parts/ky040</code>.</span>
+  <label>Firmware (.bin) <input type="file" id="fw-file" accept=".bin"></label>
+  <label>Part (.wasm) <input type="file" id="part-file" accept=".wasm"></label>
+  <div><button id="start" disabled>Start</button></div>
+</div>
+<div class="row">
+  <button class="knob" id="ccw" disabled>Turn left</button>
+  <button class="knob" id="cw" disabled>Turn right</button>
+  <button class="knob" id="press" disabled>Press</button>
+  <span class="ok" id="count">count: —</span>
+  <span class="dim" id="status">loading…</span>
+</div>
+<div id="log"></div>
+
+<script type="module">
+import init, { WasmEmulator } from "./pkg/esp_emu.js";
+import { CosimPump } from "./cosim.js";
+
+const log = document.getElementById("log");
+const put = (s, cls = "") => {
+  const d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.textContent = s;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+};
+
+// Playwright reads these rather than scraping the log. `lines` holds whole
+// lines only: output arrives in pieces, and a cut `count=-1` of `count=-12`
+// must not read as a count.
+const state = { ready: false, uart: "", lines: [], error: null };
+window.__demo = state;
+
+const buttons = ["cw", "ccw", "press"].map((id) => document.getElementById(id));
+const pressBtn = document.getElementById("press");
+const statusEl = document.getElementById("status");
+const countEl = document.getElementById("count");
+
+function fail(text) {
+  state.error = text;
+  statusEl.textContent = "failed";
+  put(text, "warn");
+}
+
+/** The bytes at `url`, or null when the server does not have it. */
+async function fetchBytes(url) {
+  const res = await fetch(url, { cache: "reload" });
+  return res.ok ? await res.arrayBuffer() : null;
+}
+
+/**
+ * The firmware and the part, as bytes. Served next to this page when they are
+ * there (a release's www/ and Pages carry them; in a checkout someone put them
+ * there); otherwise picked by the person.
+ */
+async function inputs() {
+  const fw = await fetchBytes("./_encoder_fw.bin");
+  const part = await fetchBytes("./ky040.wasm");
+  if (fw && part) return { fw, part };
+
+  const pick = document.getElementById("pick");
+  const fwFile = document.getElementById("fw-file");
+  const partFile = document.getElementById("part-file");
+  const start = document.getElementById("start");
+  pick.style.display = "flex";
+  statusEl.textContent = "waiting for files";
+  const ready = () => { start.disabled = !(fwFile.files.length && partFile.files.length); };
+  fwFile.onchange = ready;
+  partFile.onchange = ready;
+  await new Promise((r) => { start.onclick = r; });
+  pick.style.display = "none";
+  statusEl.textContent = "loading…";
+  return { fw: await fwFile.files[0].arrayBuffer(), part: await partFile.files[0].arrayBuffer() };
+}
+
+try {
+  await init();
+  const files = await inputs();
+
+  // The part runs in its own worker, loaded by the generic host. Nothing in
+  // this page knows what an encoder is.
+  const worker = new Worker("./part-worker.js", { type: "module" });
+  const chan = new MessageChannel();
+
+  worker.onmessage = (ev) => {
+    const m = ev.data;
+    if (m.type === "loaded") put(`part loaded: ${m.name}`, "dim");
+    else if (m.type === "ready") {
+      put(`part attached to ${m.chip}`, "ok");
+      state.ready = true;
+      for (const b of buttons) b.disabled = false;
+      statusEl.textContent = "running";
+    } else if (m.type === "error") fail(`part: ${m.text}`);
+  };
+
+  const emu = new WasmEmulator("esp32c6");
+  emu.load_default_rom();
+  emu.load_firmware(new Uint8Array(files.fw));
+
+  // With the worker, so a part that never answers is stopped, not left spinning.
+  const pump = new CosimPump(emu, { port: chan.port1, worker });
+  // Where the board puts it, as examples/boards/encoder/board.json does.
+  worker.postMessage(
+    { type: "start", port: chan.port2, module: files.part,
+      config: { pins: { CLK: 5, DT: 6, SW: 7 } } },
+    [chan.port2, files.part],
+  );
+
+  // Let the part attach before the firmware runs.
+  if (!(await pump.waitForDevice(5000))) {
+    fail("no part attached within 5 s");
+  } else {
+    put("emulator + part attached, running firmware", "dim");
+  }
+
+  // Each click is one detent; the part plays the four edges out on the
+  // emulated clock.
+  document.getElementById("cw").onclick = () => worker.postMessage({ type: "input", kind: "cw" });
+  document.getElementById("ccw").onclick = () => worker.postMessage({ type: "input", kind: "ccw" });
+  let down = false;
+  pressBtn.onclick = () => {
+    down = !down;
+    worker.postMessage({ type: "input", kind: down ? "press" : "release" });
+    pressBtn.textContent = down ? "Release" : "Press";
+  };
+
+  let tail = "";
+  pump.start((out) => {
+    state.uart += out;
+    const parts = (tail + out).split("\n");
+    tail = parts.pop();
+    for (const raw of parts) {
+      const line = raw.trimEnd();
+      if (!line) continue;
+      state.lines.push(line);
+      put(line, line.includes("ENCODER:") ? "ok" : "");
+      const n = line.match(/ENCODER: count=(-?\d+)/);
+      if (n) countEl.textContent = `count: ${n[1]}`;
+    }
+  }, (e) => fail(String(e && e.message || e)));
+} catch (e) {
+  fail(String(e && e.message || e));
+}
+</script>
